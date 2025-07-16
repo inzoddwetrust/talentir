@@ -1,7 +1,6 @@
 import logging
 import aiohttp
 from typing import Dict, Any, Optional
-from abc import ABC, abstractmethod
 
 import config
 from templates import MessageTemplates
@@ -153,7 +152,7 @@ class EmailManager:
                 'email_verification_subject',
                 {
                     'firstname': user.firstname,
-                    'projectName': 'JetUp Investment'
+                    'projectName': 'Talentir'
                 },
                 lang=user.lang
             )
@@ -180,7 +179,7 @@ This link will expire in 24 hours.
 If you didn't request this verification, please ignore this email.
 
 Best regards,
-JetUp Investment Team
+Talentir Team
             """
 
             # Отправляем email

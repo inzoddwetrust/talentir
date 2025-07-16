@@ -157,8 +157,8 @@ PROJECT_DOCUMENTS = {
 }
 
 # Email settings для Postmark
-EMAIL_FROM = os.getenv("EMAIL_FROM", "noreply@jetup.info")
-EMAIL_FROM_NAME = os.getenv("EMAIL_FROM_NAME", "JetUp Investment")
+EMAIL_FROM = os.getenv("EMAIL_FROM", "noreply@talentir.info")
+EMAIL_FROM_NAME = os.getenv("EMAIL_FROM_NAME", "Talentir")
 
 # Postmark API
 POSTMARK_API_TOKEN = os.getenv("POSTMARK_API_TOKEN", "")

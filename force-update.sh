@@ -1,7 +1,7 @@
 #!/bin/bash
 
-INSTALL_PATH="/opt/jetup"
-SERVICE_NAME="jetup-bot"
+INSTALL_PATH="/opt/talentir"
+SERVICE_NAME="talentir-bot"
 
 # Функция логирования
 log() {
