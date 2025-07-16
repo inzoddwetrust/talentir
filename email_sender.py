@@ -178,25 +178,14 @@ class EmailManager:
                 lang=user.lang
             )
 
-            # Получаем ТЕКСТОВУЮ версию из шаблона
-            text_body, _ = await MessageTemplates.get_raw_template(
-                'email_verification_text',
-                {
-                    'firstname': user.firstname,
-                    'verification_link': verification_link,
-                    'email': user.email
-                },
-                lang=user.lang
-            )
-
             logger.info(f"Templates loaded. Subject: {subject_text[:50]}...")
 
-            # Отправляем email
+            # Отправляем email только с HTML версией
             success = await self.provider.send_email(
                 to=user.email,
                 subject=subject_text,
                 html_body=body_html,
-                text_body=text_body
+                text_body=None  # Никаких текстовых версий!
             )
 
             if success:
