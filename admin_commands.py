@@ -173,20 +173,70 @@ class AdminCommands:
                     await reply.edit_text("❌ У вас не указан email. Сначала заполните данные через /fill_user_data")
                     return
 
-                success = await email_manager.send_notification_email(
-                    to=user.email,
-                    subject="Talentir Test Email",
-                    body="<h1>Тест Postmark</h1><p>Если вы видите это письмо - email работает!</p>"
-                )
+                # Модифицируем email_manager для получения подробной ошибки
+                try:
+                    success = await email_manager.send_notification_email(
+                        to=user.email,
+                        subject="Talentir Test Email",
+                        body="<h1>Тест Postmark</h1><p>Если вы видите это письмо - email работает!</p>"
+                    )
 
-                if success:
-                    await reply.edit_text(f"✅ Тестовое письмо отправлено на {user.email}")
-                else:
-                    await reply.edit_text(f"❌ Ошибка отправки на {user.email}")
+                    if success:
+                        await reply.edit_text(f"✅ Тестовое письмо отправлено на {user.email}")
+                    else:
+                        # Получаем последнюю ошибку из логов или делаем дополнительный запрос
+                        error_details = await self._get_postmark_error_details(user.email)
+                        await reply.edit_text(f"❌ Ошибка отправки на {user.email}\n\n{error_details}")
+
+                except Exception as send_error:
+                    await reply.edit_text(f"❌ Ошибка отправки на {user.email}\n\nПодробности: {str(send_error)}")
 
         except Exception as e:
             await message.reply(f"❌ Ошибка: {str(e)}")
             logger.error(f"Error in testmail command: {e}", exc_info=True)
+
+    async def _get_postmark_error_details(self, email: str) -> str:
+        """Получает подробности ошибки Postmark"""
+        try:
+            from email_sender import email_manager
+
+            # Делаем тестовый запрос для получения конкретной ошибки
+            import aiohttp
+
+            data = {
+                "From": f"{config.EMAIL_FROM_NAME} <{config.EMAIL_FROM}>",
+                "To": email,
+                "Subject": "Test",
+                "HtmlBody": "<p>Test</p>",
+                "MessageStream": "outbound"
+            }
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                        f"{email_manager.provider.base_url}/email",
+                        headers=email_manager.provider.headers,
+                        json=data
+                ) as response:
+                    response_data = await response.json()
+
+                    if response.status != 200:
+                        error_code = response_data.get('ErrorCode', 'Unknown')
+                        error_message = response_data.get('Message', 'Unknown error')
+
+                        # Специальные сообщения для частых ошибок
+                        if error_code == 412:
+                            return f"🔒 Аккаунт Postmark не подтвержден\n\nОшибка {error_code}: {error_message}\n\n💡 Решение: Подтвердите аккаунт в панели Postmark или используйте email на домене talentir.info"
+                        elif error_code == 422:
+                            return f"📧 Домен отправителя не верифицирован\n\nОшибка {error_code}: {error_message}\n\n💡 Решение: Верифицируйте домен talentir.info в Postmark"
+                        elif error_code == 10:
+                            return f"🔑 Неверный API токен\n\nОшибка {error_code}: {error_message}\n\n💡 Решение: Проверьте POSTMARK_API_TOKEN в .env"
+                        else:
+                            return f"❌ Ошибка {error_code}: {error_message}"
+
+                    return "Неизвестная ошибка"
+
+        except Exception as e:
+            return f"Не удалось получить подробности ошибки: {str(e)}"
 
     async def handle_admin_command(self, message: types.Message, state: FSMContext):
         """Обработчик админских команд"""
