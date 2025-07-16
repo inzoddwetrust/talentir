@@ -1,7 +1,6 @@
 import logging
 import aiohttp
 from typing import Dict, Any, Optional
-from abc import ABC, abstractmethod
 
 import config
 from templates import MessageTemplates
@@ -179,22 +178,18 @@ class EmailManager:
                 lang=user.lang
             )
 
+            # Получаем ТЕКСТОВУЮ версию из шаблона
+            text_body, _ = await MessageTemplates.get_raw_template(
+                'email_verification_text',
+                {
+                    'firstname': user.firstname,
+                    'verification_link': verification_link,
+                    'email': user.email
+                },
+                lang=user.lang
+            )
+
             logger.info(f"Templates loaded. Subject: {subject_text[:50]}...")
-
-            # Создаем текстовую версию из HTML (простая версия)
-            text_body = f"""
-Hello {user.firstname},
-
-Please verify your email address by clicking the link below:
-{verification_link}
-
-This link will expire in 24 hours.
-
-If you didn't request this verification, please ignore this email.
-
-Best regards,
-Talentir Team
-            """
 
             # Отправляем email
             success = await self.provider.send_email(
