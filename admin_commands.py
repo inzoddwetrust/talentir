@@ -223,6 +223,38 @@ class AdminCommands:
                 logger.error(error_msg, exc_info=True)
                 await message.reply(error_msg)
 
+        elif command == "testmail":
+            try:
+                reply = await message.reply("🔄 Тестируем Postmark...")
+
+                from email_sender import email_manager
+
+                # Проверяем подключение
+                connected = await email_manager.test_connection()
+                if not connected:
+                    await reply.edit_text("❌ Не могу подключиться к Postmark. Проверьте POSTMARK_API_TOKEN")
+                    return
+
+                # Пробуем отправить тестовое письмо самому админу
+                user = session.query(User).filter_by(telegramID=message.from_user.id).first()
+                if not user or not user.email:
+                    await reply.edit_text("❌ У вас не указан email. Сначала заполните данные через /fill_user_data")
+                    return
+
+                success = await email_manager.send_notification_email(
+                    to=user.email,
+                    subject="Talentir Test Email",
+                    body="<h1>Тест Postmark</h1><p>Если вы видите это письмо - email работает!</p>"
+                )
+
+                if success:
+                    await reply.edit_text(f"✅ Тестовое письмо отправлено на {user.email}")
+                else:
+                    await reply.edit_text(f"❌ Ошибка отправки на {user.email}")
+
+            except Exception as e:
+                await message.reply(f"❌ Ошибка: {str(e)}")
+
         elif command == "check":
             try:
                 reply = await message.reply("🔍 Проверяю платежи...")

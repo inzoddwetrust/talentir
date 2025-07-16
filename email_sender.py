@@ -1,6 +1,7 @@
 import logging
 import aiohttp
 from typing import Dict, Any, Optional
+from abc import ABC, abstractmethod
 
 import config
 from templates import MessageTemplates
@@ -34,6 +35,8 @@ class PostmarkProvider:
             bool: True если письмо отправлено успешно
         """
         try:
+            logger.info(f"Attempting to send email to {to} with subject: {subject}")
+
             # Подготавливаем данные для отправки
             data = {
                 "From": f"{config.EMAIL_FROM_NAME} <{config.EMAIL_FROM}>",
@@ -64,12 +67,17 @@ class PostmarkProvider:
                         error_message = response_data.get('Message', 'Unknown error')
                         error_code = response_data.get('ErrorCode', 'Unknown')
                         logger.error(f"Postmark API error ({error_code}): {error_message}")
+                        logger.error(f"Full response: {response_data}")
 
                         # Логируем дополнительную информацию для отладки
                         if error_code == 406:
                             logger.error("Inactive recipient - email address may be on suppression list")
                         elif error_code == 300:
                             logger.error("Invalid email request - check email format and content")
+                        elif error_code == 10:
+                            logger.error("Bad or missing API token")
+                        elif error_code == 422:
+                            logger.error("Unprocessable Entity - check From address is verified")
 
                         return False
 
@@ -78,6 +86,7 @@ class PostmarkProvider:
             return False
         except Exception as e:
             logger.error(f"Unexpected error while sending email via Postmark: {e}")
+            logger.exception("Full traceback:")
             return False
 
     async def send_template_email(self, to: str, template_alias: str, template_model: Dict[str, Any]) -> bool:
@@ -130,6 +139,7 @@ class EmailManager:
             self.provider = None
         else:
             self.provider = PostmarkProvider(config.POSTMARK_API_TOKEN)
+            logger.info("EmailManager initialized with Postmark provider")
 
     async def send_verification_email(self, user, verification_link: str) -> bool:
         """
@@ -147,6 +157,8 @@ class EmailManager:
             return False
 
         try:
+            logger.info(f"Preparing verification email for user {user.userID} ({user.email})")
+
             # Получаем шаблоны из Google Sheets
             subject_text, _ = await MessageTemplates.get_raw_template(
                 'email_verification_subject',
@@ -166,6 +178,8 @@ class EmailManager:
                 },
                 lang=user.lang
             )
+
+            logger.info(f"Templates loaded. Subject: {subject_text[:50]}...")
 
             # Создаем текстовую версию из HTML (простая версия)
             text_body = f"""
@@ -190,10 +204,16 @@ Talentir Team
                 text_body=text_body
             )
 
+            if success:
+                logger.info(f"Verification email sent successfully to {user.email}")
+            else:
+                logger.error(f"Failed to send verification email to {user.email}")
+
             return success
 
         except Exception as e:
             logger.error(f"Error in send_verification_email: {e}")
+            logger.exception("Full traceback:")
             return False
 
     async def send_notification_email(self, to: str, subject: str, body: str) -> bool:
@@ -226,6 +246,8 @@ Talentir Team
             return False
 
         try:
+            logger.info("Testing Postmark connection...")
+
             # Используем endpoint для получения информации о сервере
             async with aiohttp.ClientSession() as session:
                 async with session.get(
@@ -237,11 +259,14 @@ Talentir Team
                         logger.info(f"Successfully connected to Postmark server: {server_info.get('Name')}")
                         return True
                     else:
+                        response_data = await response.json()
                         logger.error(f"Failed to connect to Postmark: {response.status}")
+                        logger.error(f"Response: {response_data}")
                         return False
 
         except Exception as e:
             logger.error(f"Error testing Postmark connection: {e}")
+            logger.exception("Full traceback:")
             return False
 
 
