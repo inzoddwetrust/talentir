@@ -1,7 +1,6 @@
 aiogram==2.25.1
 aiohttp==3.8.6
 aiosignal==1.3.1
-appscript==1.3.0
 async-timeout==4.0.3
 attrs==24.2.0
 Babel==2.9.1
@@ -13,7 +12,7 @@ cffi==1.17.1
 charset-normalizer==3.3.2
 cssselect2==0.7.0
 decorator==4.4.2
-docx2pdf==0.1.8
+# docx2pdf==0.1.8  # macOS only - removed for Linux
 docxcompose==1.4.0
 docxtpl==0.19.1
 fonttools==4.55.3
