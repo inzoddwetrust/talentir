@@ -311,6 +311,22 @@ class AdminCommands:
         elif command == "testmail":
             await self.handle_testmail(message)
 
+        elif command == "legacy":
+            try:
+                reply = await message.reply("🔄 Проверяю legacy миграцию...")
+
+                from legacy_user_processor import legacy_processor
+
+                # Запускаем одну итерацию проверки
+                await legacy_processor._process_legacy_users()
+
+                await reply.edit_text("✅ Legacy миграция проверена вручную")
+
+            except Exception as e:
+                error_msg = f"❌ Ошибка при проверке legacy миграции: {str(e)}"
+                logger.error(error_msg, exc_info=True)
+                await message.reply(error_msg)
+
         elif command == "check":
             try:
                 reply = await message.reply("🔍 Проверяю платежи...")

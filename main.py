@@ -26,7 +26,7 @@ from message_manager import MessageManager
 from transfer_manager import TransferManager
 from user_decorator import with_user
 from bookstack_integration import BookStackManager
-from legaсy_user_processor import legacy_processor
+from legacy_user_processor import legacy_processor
 import config
 import helpers
 
