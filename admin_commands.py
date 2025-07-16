@@ -311,20 +311,52 @@ class AdminCommands:
         elif command == "testmail":
             await self.handle_testmail(message)
 
+
         elif command == "legacy":
+
             try:
+
                 reply = await message.reply("🔄 Проверяю legacy миграцию...")
 
                 from legacy_user_processor import legacy_processor
 
                 # Запускаем одну итерацию проверки
-                await legacy_processor._process_legacy_users()
 
-                await reply.edit_text("✅ Legacy миграция проверена вручную")
+                stats = await legacy_processor._process_legacy_users()
+
+                # Формируем подробный отчет
+
+                report = f"📊 Legacy Migration Report:\n\n"
+
+                report += f"📋 Total records: {stats['total_records']}\n"
+
+                report += f"👤 Users found: {stats['users_found']}\n"
+
+                report += f"👥 Upliners assigned: {stats['upliners_assigned']}\n"
+
+                report += f"📈 Purchases created: {stats['purchases_created']}\n"
+
+                report += f"✅ Completed: {stats['completed']}\n"
+
+                report += f"❌ Errors: {stats['errors']}\n\n"
+
+                if stats['users_found'] == 0 and stats['upliners_assigned'] == 0 and stats['purchases_created'] == 0:
+
+                    report += "🔍 No new legacy users found to process."
+
+                else:
+
+                    report += "🎯 Legacy migration processing completed!"
+
+                await reply.edit_text(report)
+
 
             except Exception as e:
+
                 error_msg = f"❌ Ошибка при проверке legacy миграции: {str(e)}"
+
                 logger.error(error_msg, exc_info=True)
+
                 await message.reply(error_msg)
 
         elif command == "check":

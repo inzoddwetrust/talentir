@@ -54,7 +54,9 @@ class LegacyUserProcessor:
         """Основной цикл миграции"""
         while self._running:
             try:
-                await self._process_legacy_users()
+                stats = await self._process_legacy_users()
+                if stats['users_found'] > 0 or stats['upliners_assigned'] > 0 or stats['purchases_created'] > 0:
+                    logger.info(f"Legacy migration stats: {stats}")
                 await asyncio.sleep(self.check_interval)
             except Exception as e:
                 logger.error(f"Error in legacy migration loop: {e}", exc_info=True)
@@ -106,45 +108,52 @@ class LegacyUserProcessor:
             logger.error(f"Error loading legacy users: {e}", exc_info=True)
             return []
 
-    async def _process_legacy_users(self):
-        """Обрабатывает всех legacy пользователей"""
+    async def _process_legacy_users(self) -> Dict[str, int]:
+        """Обрабатывает всех legacy пользователей и возвращает статистику"""
         legacy_users = await self._get_legacy_users()
 
+        stats = {
+            'total_records': len(legacy_users),
+            'users_found': 0,
+            'upliners_assigned': 0,
+            'purchases_created': 0,
+            'completed': 0,
+            'errors': 0
+        }
+
         if not legacy_users:
-            return
+            return stats
 
         with Session() as session:
-            updates_made = False
-
             for legacy_user in legacy_users:
                 try:
                     # Этап 1: Поиск пользователя
                     if not legacy_user.is_found:
                         if await self._find_and_mark_user(session, legacy_user):
-                            updates_made = True
+                            stats['users_found'] += 1
 
-                    # Этап 2: Поиск аплайнера
-                    if legacy_user.is_found and not legacy_user.upliner_found:
-                        if await self._find_and_assign_upliner(session, legacy_user):
-                            updates_made = True
-
-                    # Этап 3: Начисление акций
+                    # Этап 2: Начисление акций (независимо от аплайнера)
                     if legacy_user.is_found and not legacy_user.purchase:
                         if await self._create_legacy_purchase(session, legacy_user):
-                            updates_made = True
+                            stats['purchases_created'] += 1
 
-                    # Этап 4: Финализация
-                    if (legacy_user.is_found and legacy_user.purchase and
-                            not legacy_user.done):
+                    # Этап 3: Поиск аплайнера (независимо от акций, может быть в любой момент)
+                    if legacy_user.is_found and legacy_user.upliner_email and not legacy_user.upliner_found:
+                        if await self._find_and_assign_upliner(session, legacy_user):
+                            stats['upliners_assigned'] += 1
+
+                    # Этап 4: Финализация (если пользователь найден И акции начислены)
+                    # Аплайнер НЕ обязателен для завершения
+                    if (legacy_user.is_found and legacy_user.purchase and not legacy_user.done):
                         if await self._finalize_legacy_user(session, legacy_user):
-                            updates_made = True
+                            stats['completed'] += 1
 
                 except Exception as e:
+                    stats['errors'] += 1
                     logger.error(f"Error processing legacy user {legacy_user.email}: {e}")
                     continue
 
-            if updates_made:
-                logger.info("Legacy migration updates completed")
+        return stats
 
     async def _find_and_mark_user(self, session: Session, legacy_user: LegacyUserRecord) -> bool:
         """Находит пользователя в системе и отмечает его как найденного"""
@@ -177,17 +186,20 @@ class LegacyUserProcessor:
         """Находит и назначает аплайнера пользователю"""
         try:
             if not legacy_user.upliner_email:
+                logger.debug(f"No upliner email for user {legacy_user.email}")
                 return False
 
             # Ищем аплайнера
             upliner = session.query(User).filter_by(email=legacy_user.upliner_email).first()
 
             if not upliner:
+                logger.debug(f"Upliner {legacy_user.upliner_email} not found yet")
                 return False
 
             # Проверяем что email аплайнера верифицирован
             email_confirmed = helpers.get_user_note(upliner, 'emailConfirmed')
             if email_confirmed != '1':
+                logger.debug(f"Upliner {legacy_user.upliner_email} email not confirmed yet")
                 return False
 
             # Получаем пользователя
@@ -198,7 +210,7 @@ class LegacyUserProcessor:
                 logger.error(f"User {user_id} not found when assigning upliner")
                 return False
 
-            # Обновляем аплайнера
+            # Обновляем аплайнера (НЕЗАВИСИМО от того, есть ли уже акции)
             old_upline = db_user.upline
             db_user.upline = upliner.telegramID
             session.commit()
