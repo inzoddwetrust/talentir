@@ -110,12 +110,6 @@ FAQ_URL = "91.227.18.8/books/user-documents/page/option-alienation-agreement"
 # Список обязательных каналов/групп для подписки
 REQUIRED_CHANNELS = [
     {
-        "chat_id": "@zoddtest",
-        "title": "Русский канал, которого нет",
-        "url": "https://t.me/zoddtest",
-        "lang": "ru"
-    },
-    {
         "chat_id": "@jetnews_en",
         "title": "JET News English",
         "url": "https://t.me/jetnews_en",
