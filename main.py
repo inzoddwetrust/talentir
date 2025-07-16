@@ -26,6 +26,7 @@ from message_manager import MessageManager
 from transfer_manager import TransferManager
 from user_decorator import with_user
 from bookstack_integration import BookStackManager
+from legaсy_user_processor import legacy_processor
 import config
 import helpers
 
@@ -2787,6 +2788,12 @@ async def start_services(global_vars):
     services.append(asyncio.create_task(
         sheets_exporter.start(),
         name="sheets_exporter"
+    ))
+
+    # Добавляем legacy процессор
+    services.append(asyncio.create_task(
+        legacy_processor.start(),
+        name="legacy_migration"
     ))
 
     return services
