@@ -217,6 +217,7 @@ class SMTPProvider:
                 username=self.username,
                 password=self.password,
                 start_tls=True,
+                use_tls=False,  # Добавляем эту строку
                 timeout=30
             )
 
