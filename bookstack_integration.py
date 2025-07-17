@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 class TemplateCache:
     """Класс для кеширования HTML-шаблонов из BookStack"""
     _cache = {}  # {key: (html, timestamp)}
-    _ttl = 3600  # TTL в секундах (1 час)
+    _ttl = 600
 
     @classmethod
     def get(cls, key: str) -> Optional[str]:
@@ -140,8 +140,11 @@ class BookStackManager:
             content_div = soup.select_one('.page-content')
 
             if content_div:
+                first_h1 = content_div.find('h1')
+                if first_h1:
+                    first_h1.decompose()
+
                 html = str(content_div)
-                # Сохраняем в кеш
                 TemplateCache.set(cache_key, html)
                 return html
 
@@ -196,66 +199,7 @@ class BookStackManager:
             logger.error(f"Ошибка рендеринга шаблона: {e}")
             return html
 
-    # def generate_pdf(self, html: str) -> Optional[bytes]:
-    #     """
-    #     Генерация PDF из HTML
-    #
-    #     Args:
-    #         html: HTML-контент
-    #
-    #     Returns:
-    #         PDF-документ в виде байтов или None в случае ошибки
-    #     """
-    #     try:
-    #         # Проверяем, что HTML не пустой
-    #         if not html or not html.strip():
-    #             logger.error("Пустой HTML контент для генерации PDF")
-    #             return None
-    #
-    #         import weasyprint
-    #
-    #         # Добавляем базовые стили и обертку для HTML
-    #         styled_html = f"""
-    #         <!DOCTYPE html>
-    #         <html>
-    #         <head>
-    #             <meta charset="UTF-8">
-    #             <style>
-    #                 body {{ font-family: Arial, sans-serif; margin: 2cm; }}
-    #                 h1, h2, h3 {{ color: #333; }}
-    #                 table {{ border-collapse: collapse; width: 100%; margin: 1em 0; }}
-    #                 th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
-    #                 th {{ background-color: #f2f2f2; }}
-    #             </style>
-    #         </head>
-    #         <body>
-    #             {html}
-    #         </body>
-    #         </html>
-    #         """
-    #
-    #         # Подробное логирование для отладки
-    #         logger.debug(f"Trying to generate PDF from HTML (length: {len(styled_html)})")
-    #
-    #         # Создаем HTML-объект
-    #         html_obj = weasyprint.HTML(string=styled_html)
-    #
-    #         # Генерируем PDF
-    #         pdf_bytes = html_obj.write_pdf()
-    #
-    #         if pdf_bytes:
-    #             logger.info(f"PDF successfully generated, size: {len(pdf_bytes)} bytes")
-    #         else:
-    #             logger.error("WeasyPrint вернул пустой PDF")
-    #
-    #         return pdf_bytes
-    #     except ImportError as e:
-    #         logger.error(
-    #             f"Ошибка импорта WeasyPrint: {e}. Убедитесь, что библиотека установлена: pip install weasyprint")
-    #         return None
-    #     except Exception as e:
-    #         logger.error(f"Ошибка генерации PDF: {e}", exc_info=True)  # Добавлен вывод полного трейса ошибки
-    #         return None
+
     def generate_pdf(self, html: str) -> Optional[bytes]:
         """
         Генерация PDF из HTML с использованием pdfkit и wkhtmltopdf
