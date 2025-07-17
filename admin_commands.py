@@ -1,4 +1,5 @@
 import logging
+import asyncio
 from aiogram.dispatcher.filters import Filter
 from aiogram.dispatcher import FSMContext
 from aiogram import Dispatcher, types
@@ -313,6 +314,103 @@ class AdminCommands:
         except Exception as e:
             return f"Не удалось получить подробности ошибки: {str(e)}"
 
+    async def handle_testsmtp(self, message: types.Message):
+        """Обработчик команды &testsmtp для диагностики SMTP подключения"""
+        try:
+            reply = await message.reply("🔧 Диагностика SMTP подключения...")
+
+            # Проверяем конфигурацию
+            smtp_config = {
+                'host': getattr(config, 'SMTP_HOST', 'не установлен'),
+                'port': getattr(config, 'SMTP_PORT', 'не установлен'),
+                'user': getattr(config, 'SMTP_USER', 'не установлен'),
+                'password': '***' if hasattr(config, 'SMTP_PASSWORD') and config.SMTP_PASSWORD else 'не установлен'
+            }
+
+            config_text = "\n".join([f"• {k}: {v}" for k, v in smtp_config.items()])
+            await reply.edit_text(f"📋 Конфигурация SMTP:\n{config_text}\n\n🔌 Проверяем подключение...")
+
+            # Пробуем подключиться напрямую
+            import aiosmtplib
+
+            try:
+                smtp = aiosmtplib.SMTP(
+                    hostname=config.SMTP_HOST,
+                    port=config.SMTP_PORT,
+                    timeout=10
+                )
+
+                await smtp.connect()
+                await reply.edit_text(f"📋 Конфигурация SMTP:\n{config_text}\n\n"
+                                      f"✅ Подключение установлено\n\n"
+                                      f"🔐 Пробуем аутентификацию...")
+
+                try:
+                    await smtp.starttls()
+                    await smtp.login(config.SMTP_USER, config.SMTP_PASSWORD)
+                    await reply.edit_text(f"📋 Конфигурация SMTP:\n{config_text}\n\n"
+                                          f"✅ Подключение установлено\n"
+                                          f"✅ Аутентификация успешна\n\n"
+                                          f"📨 Отправляем тестовое письмо...")
+
+                    # Создаем тестовое письмо
+                    from email.mime.text import MIMEText
+
+                    # Получаем email админа
+                    with Session() as session:
+                        admin_user = session.query(User).filter_by(telegramID=message.from_user.id).first()
+                        if not admin_user or not admin_user.email:
+                            await reply.edit_text(f"📋 Конфигурация SMTP:\n{config_text}\n\n"
+                                                  f"✅ Подключение установлено\n"
+                                                  f"✅ Аутентификация успешна\n\n"
+                                                  f"❌ У вас не указан email!")
+                            await smtp.quit()
+                            return
+
+                    message_obj = MIMEText("SMTP Direct Test from Talentir", 'plain', 'utf-8')
+                    message_obj['From'] = f"{config.EMAIL_FROM_NAME} <{config.EMAIL_FROM}>"
+                    message_obj['To'] = admin_user.email
+                    message_obj['Subject'] = "SMTP Direct Test"
+
+                    await smtp.send_message(message_obj)
+                    await smtp.quit()
+
+                    await reply.edit_text(f"🎉 **SMTP полностью работает!**\n\n"
+                                          f"📋 Конфигурация:\n{config_text}\n\n"
+                                          f"✅ Подключение установлено\n"
+                                          f"✅ Аутентификация успешна\n"
+                                          f"✅ Письмо отправлено на {admin_user.email}\n\n"
+                                          f"📬 Проверьте почту!")
+
+                except aiosmtplib.SMTPAuthenticationError as e:
+                    await reply.edit_text(f"📋 Конфигурация SMTP:\n{config_text}\n\n"
+                                          f"✅ Подключение установлено\n"
+                                          f"❌ Ошибка аутентификации:\n{str(e)}\n\n"
+                                          f"Проверьте:\n"
+                                          f"• Правильность логина/пароля\n"
+                                          f"• Существует ли пользователь {config.SMTP_USER}")
+
+                except Exception as e:
+                    await reply.edit_text(f"📋 Конфигурация SMTP:\n{config_text}\n\n"
+                                          f"✅ Подключение установлено\n"
+                                          f"❌ Ошибка при отправке: {str(e)}")
+
+            except asyncio.TimeoutError:
+                await reply.edit_text(f"📋 Конфигурация SMTP:\n{config_text}\n\n"
+                                      f"❌ Таймаут подключения к {config.SMTP_HOST}:{config.SMTP_PORT}\n\n"
+                                      f"Возможные причины:\n"
+                                      f"• Неверный хост или порт\n"
+                                      f"• Блокировка фаерволом\n"
+                                      f"• SMTP сервер не запущен")
+
+            except Exception as e:
+                await reply.edit_text(f"📋 Конфигурация SMTP:\n{config_text}\n\n"
+                                      f"❌ Ошибка подключения: {str(e)}")
+
+        except Exception as e:
+            await message.reply(f"❌ Критическая ошибка: {str(e)}")
+            logger.error(f"Error in testsmtp command: {e}", exc_info=True)
+
     async def handle_admin_command(self, message: types.Message, state: FSMContext):
         """Обработчик админских команд"""
 
@@ -386,6 +484,8 @@ class AdminCommands:
         elif command == "testmail":
             await self.handle_testmail(message)
 
+        elif command == "testsmtp":
+            await self.handle_testsmtp(message)
 
         elif command == "legacy":
 
