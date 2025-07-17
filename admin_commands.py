@@ -12,6 +12,9 @@ from imports import (
     ProjectImporter, UserImporter, OptionImporter,
     PaymentImporter, PurchaseImporter, BonusImporter, ConfigImporter, import_all
 )
+
+from database import Payment, Notification, User, Project, Purchase, ActiveBalance
+from bonus_processor import process_purchase_with_bonuses
 from templates import MessageTemplates
 from google_services import get_google_services
 from sqlalchemy import func
@@ -417,6 +420,178 @@ class AdminCommands:
             await message.reply(f"❌ Критическая ошибка: {str(e)}")
             logger.error(f"Error in testsmtp command: {e}", exc_info=True)
 
+    async def handle_addtokens(self, message: types.Message):
+        """Handler for &addtokens command to manually add shares to user"""
+        try:
+            # Parse command arguments
+            command_text = message.text[1:].strip()  # Remove & and whitespace
+
+            # Expected format: addtokens u:{userID} pj:{projectID} q:{Qty} pr:{Price}
+            if not command_text.startswith('addtokens'):
+                await message.reply("❌ Invalid command format")
+                return
+
+            # Extract parameters using regex
+            import re
+
+            # Parse parameters
+            user_match = re.search(r'u:(\d+)', command_text)
+            project_match = re.search(r'pj:(\d+)', command_text)
+            qty_match = re.search(r'q:(\d+)', command_text)
+            price_match = re.search(r'pr:([\d.]+)', command_text)
+
+            if not all([user_match, project_match, qty_match, price_match]):
+                await message.reply(
+                    "❌ Invalid command format!\n\n"
+                    "Usage: &addtokens u:{userID} pj:{projectID} q:{Qty} pr:{Price}\n\n"
+                    "Example: &addtokens u:123 pj:42 q:100 pr:50.00"
+                )
+                return
+
+            # Extract values
+            user_id = int(user_match.group(1))
+            project_id = int(project_match.group(1))
+            quantity = int(qty_match.group(1))
+            price = float(price_match.group(1))
+
+            # Validate parameters
+            if quantity <= 0:
+                await message.reply("❌ Quantity must be positive")
+                return
+
+            if price < 0:
+                await message.reply("❌ Price cannot be negative")
+                return
+
+            reply = await message.reply(f"🔄 Processing manual share addition...")
+
+            with Session() as session:
+                # Check if user exists
+                target_user = session.query(User).filter_by(userID=user_id).first()
+                if not target_user:
+                    await reply.edit_text(f"❌ User with ID {user_id} not found")
+                    return
+
+                # Check if project exists
+                project = session.query(Project).filter_by(projectID=project_id).first()
+                if not project:
+                    await reply.edit_text(f"❌ Project with ID {project_id} not found")
+                    return
+
+                # Get admin user for logging
+                admin_user = session.query(User).filter_by(telegramID=message.from_user.id).first()
+                admin_name = admin_user.firstname if admin_user else "Unknown Admin"
+
+                # Create purchase record with optionID=0 (manual addition)
+                purchase = Purchase(
+                    userID=user_id,
+                    projectID=project_id,
+                    projectName=project.projectName,
+                    optionID=0,  # Special value for manual additions
+                    packQty=quantity,
+                    packPrice=price,
+                    createdAt=datetime.utcnow()
+                )
+
+                session.add(purchase)
+                session.flush()  # Get the purchase ID
+
+                # Create ActiveBalance record for tracking
+                balance_record = ActiveBalance(
+                    userID=user_id,
+                    firstname=target_user.firstname,
+                    surname=target_user.surname,
+                    amount=0.0,  # No balance change for manual addition
+                    status='done',
+                    reason=f'manual_addition={purchase.purchaseID}',
+                    link='',
+                    notes=f'Manual share addition by admin: {admin_name} ({message.from_user.id})'
+                )
+                session.add(balance_record)
+
+                # Create notification for the user
+                text, buttons = await MessageTemplates.get_raw_template(
+                    'admin_tokens_added_notification',
+                    {
+                        'firstname': target_user.firstname,
+                        'quantity': quantity,
+                        'project_name': project.projectName,
+                        'price': price,
+                        'admin_name': admin_name
+                    },
+                    lang=target_user.lang
+                )
+
+                user_notification = Notification(
+                    source="admin_command",
+                    text=text,
+                    buttons=buttons,
+                    target_type="user",
+                    target_value=str(user_id),
+                    priority=2,
+                    category="admin",
+                    importance="high",
+                    parse_mode="HTML"
+                )
+                session.add(user_notification)
+
+                # Create notification for other admins
+                admin_text, admin_buttons = await MessageTemplates.get_raw_template(
+                    'admin_tokens_added_admin_notification',
+                    {
+                        'admin_name': admin_name,
+                        'admin_id': message.from_user.id,
+                        'user_name': target_user.firstname,
+                        'user_id': user_id,
+                        'quantity': quantity,
+                        'project_name': project.projectName,
+                        'price': price,
+                        'purchase_id': purchase.purchaseID
+                    }
+                )
+
+                # Send to all admins except the one who executed the command
+                for admin_id in config.ADMIN_USER_IDS:
+                    if admin_id != (admin_user.userID if admin_user else None):
+                        admin_notification = Notification(
+                            source="admin_command",
+                            text=admin_text,
+                            buttons=admin_buttons,
+                            target_type="user",
+                            target_value=str(admin_id),
+                            priority=1,
+                            category="admin",
+                            importance="normal",
+                            parse_mode="HTML"
+                        )
+                        session.add(admin_notification)
+
+                session.commit()
+
+                # Process bonuses for this purchase
+                asyncio.create_task(process_purchase_with_bonuses(purchase.purchaseID))
+
+                # Success message
+                await reply.edit_text(
+                    f"✅ Successfully added shares!\n\n"
+                    f"👤 User: {target_user.firstname} (ID: {user_id})\n"
+                    f"📊 Project: {project.projectName} (ID: {project_id})\n"
+                    f"🎯 Quantity: {quantity} shares\n"
+                    f"💰 Price: ${price:.2f}\n"
+                    f"🆔 Purchase ID: {purchase.purchaseID}\n\n"
+                    f"📬 User has been notified\n"
+                    f"🎁 Referral bonuses will be processed automatically"
+                )
+
+                logger.info(f"Manual shares added by admin {message.from_user.id}: "
+                            f"User {user_id}, Project {project_id}, Qty {quantity}, Price {price}")
+
+        except ValueError as e:
+            await message.reply(f"❌ Invalid parameter format: {str(e)}")
+        except Exception as e:
+            logger.error(f"Error in addtokens command: {e}", exc_info=True)
+            await message.reply(f"❌ Error adding shares: {str(e)}")
+
     async def handle_admin_command(self, message: types.Message, state: FSMContext):
         """Обработчик админских команд"""
 
@@ -486,6 +661,9 @@ class AdminCommands:
                 error_msg = f"❌ Ошибка обновления шаблонов: {str(e)}"
                 logger.error(error_msg, exc_info=True)
                 await message.reply(error_msg)
+
+        elif command.startswith("addtokens"):
+            await self.handle_addtokens(message)
 
         elif command == "testmail":
             await self.handle_testmail(message)
