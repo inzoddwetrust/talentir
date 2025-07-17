@@ -13,7 +13,7 @@ from imports import (
     PaymentImporter, PurchaseImporter, BonusImporter, ConfigImporter, import_all
 )
 
-from database import Payment, Notification, User, Project, Purchase, ActiveBalance
+from database import Option, Notification, User, Bonus, Project, Purchase, ActiveBalance, PassiveBalance
 from bonus_processor import process_purchase_with_bonuses
 from templates import MessageTemplates
 from google_services import get_google_services
@@ -426,7 +426,7 @@ class AdminCommands:
             # Parse command arguments
             command_text = message.text[1:].strip()  # Remove & and whitespace
 
-            # Expected format: addtokens u:{userID} pj:{projectID} q:{Qty} pr:{Price}
+            # Expected format: addtokens u:{userID} pj:{projectID} q:{Qty} o:{OptionID} (optional)
             if not command_text.startswith('addtokens'):
                 await message.reply("❌ Invalid command format")
                 return
@@ -438,13 +438,16 @@ class AdminCommands:
             user_match = re.search(r'u:(\d+)', command_text)
             project_match = re.search(r'pj:(\d+)', command_text)
             qty_match = re.search(r'q:(\d+)', command_text)
-            price_match = re.search(r'pr:([\d.]+)', command_text)
+            option_match = re.search(r'o:(\d+)', command_text)
 
-            if not all([user_match, project_match, qty_match, price_match]):
+            if not all([user_match, project_match, qty_match]):
                 await message.reply(
                     "❌ Invalid command format!\n\n"
-                    "Usage: &addtokens u:{userID} pj:{projectID} q:{Qty} pr:{Price}\n\n"
-                    "Example: &addtokens u:123 pj:42 q:100 pr:50.00"
+                    "Usage: &addtokens u:{userID} pj:{projectID} q:{Qty} o:{OptionID}\n"
+                    "       &addtokens u:{userID} pj:{projectID} q:{Qty}\n\n"
+                    "Examples:\n"
+                    "  &addtokens u:123 pj:42 q:100 o:456\n"
+                    "  &addtokens u:123 pj:42 q:100"
                 )
                 return
 
@@ -452,15 +455,11 @@ class AdminCommands:
             user_id = int(user_match.group(1))
             project_id = int(project_match.group(1))
             quantity = int(qty_match.group(1))
-            price = float(price_match.group(1))
+            option_id = int(option_match.group(1)) if option_match else None
 
             # Validate parameters
             if quantity <= 0:
                 await message.reply("❌ Quantity must be positive")
-                return
-
-            if price < 0:
-                await message.reply("❌ Price cannot be negative")
                 return
 
             reply = await message.reply(f"🔄 Processing manual share addition...")
@@ -478,25 +477,76 @@ class AdminCommands:
                     await reply.edit_text(f"❌ Project with ID {project_id} not found")
                     return
 
+                # Find option
+                if option_id:
+                    # Use specified option
+                    option = session.query(Option).filter_by(
+                        optionID=option_id,
+                        projectID=project_id
+                    ).first()
+
+                    if not option:
+                        await reply.edit_text(
+                            f"❌ Option with ID {option_id} not found for project {project_id}"
+                        )
+                        return
+
+                    # Check if specified quantity matches option or is within reasonable bounds
+                    if quantity != option.packQty:
+                        await reply.edit_text(
+                            f"⚠️ Warning: Specified quantity ({quantity}) differs from option quantity ({option.packQty})\n"
+                            f"Proceeding with specified quantity: {quantity}"
+                        )
+
+                else:
+                    # Find first available option for this project (preferably active)
+                    option = session.query(Option).filter_by(
+                        projectID=project_id,
+                        isActive=True
+                    ).order_by(Option.optionID.asc()).first()
+
+                    if not option:
+                        # If no active options, try inactive ones
+                        option = session.query(Option).filter_by(
+                            projectID=project_id
+                        ).order_by(Option.optionID.asc()).first()
+
+                    if not option:
+                        await reply.edit_text(
+                            f"❌ No options found for project {project_id}\n"
+                            f"Please create an option first or specify option ID"
+                        )
+                        return
+
+                    # Inform about auto-selected option
+                    await reply.edit_text(
+                        f"🔄 Auto-selected option {option.optionID} for project {project_id}\n"
+                        f"Option: {option.packQty} shares at ${option.costPerShare:.2f} per share\n"
+                        f"Processing {quantity} shares..."
+                    )
+
+                # Calculate total price based on option's price per share
+                total_price = option.costPerShare * quantity
+
                 # Get admin user for logging
                 admin_user = session.query(User).filter_by(telegramID=message.from_user.id).first()
                 admin_name = admin_user.firstname if admin_user else "Unknown Admin"
 
-                # Create purchase record with optionID=0 (manual addition)
+                # Create purchase record using existing option
                 purchase = Purchase(
                     userID=user_id,
                     projectID=project_id,
                     projectName=project.projectName,
-                    optionID=0,  # Special value for manual additions
+                    optionID=option.optionID,
                     packQty=quantity,
-                    packPrice=price,
+                    packPrice=total_price,
                     createdAt=datetime.utcnow()
                 )
 
                 session.add(purchase)
                 session.flush()  # Get the purchase ID
 
-                # Create ActiveBalance record for tracking
+                # Create ActiveBalance record for tracking (no actual balance change)
                 balance_record = ActiveBalance(
                     userID=user_id,
                     firstname=target_user.firstname,
@@ -505,7 +555,8 @@ class AdminCommands:
                     status='done',
                     reason=f'manual_addition={purchase.purchaseID}',
                     link='',
-                    notes=f'Manual share addition by admin: {admin_name} ({message.from_user.id})'
+                    notes=f'Manual share addition by admin: {admin_name} ({message.from_user.id}). '
+                          f'Option: {option.optionID}, Qty: {quantity}, Price: ${total_price:.2f}'
                 )
                 session.add(balance_record)
 
@@ -516,7 +567,7 @@ class AdminCommands:
                         'firstname': target_user.firstname,
                         'quantity': quantity,
                         'project_name': project.projectName,
-                        'price': price,
+                        'price': total_price,
                         'admin_name': admin_name
                     },
                     lang=target_user.lang
@@ -545,8 +596,9 @@ class AdminCommands:
                         'user_id': user_id,
                         'quantity': quantity,
                         'project_name': project.projectName,
-                        'price': price,
-                        'purchase_id': purchase.purchaseID
+                        'price': total_price,
+                        'purchase_id': purchase.purchaseID,
+                        'option_id': option.optionID
                     }
                 )
 
@@ -568,29 +620,271 @@ class AdminCommands:
 
                 session.commit()
 
-                # Process bonuses for this purchase
-                asyncio.create_task(process_purchase_with_bonuses(purchase.purchaseID))
+                # NOTE: No referral bonuses for manual admin additions
+                # asyncio.create_task(process_purchase_with_bonuses(purchase.purchaseID))
 
                 # Success message
+                option_status = "🟢 Active" if option.isActive else "🔴 Inactive"
                 await reply.edit_text(
                     f"✅ Successfully added shares!\n\n"
                     f"👤 User: {target_user.firstname} (ID: {user_id})\n"
                     f"📊 Project: {project.projectName} (ID: {project_id})\n"
                     f"🎯 Quantity: {quantity} shares\n"
-                    f"💰 Price: ${price:.2f}\n"
+                    f"💰 Total Price: ${total_price:.2f}\n"
+                    f"🔧 Option: {option.optionID} ({option_status})\n"
+                    f"💵 Price per share: ${option.costPerShare:.2f}\n"
                     f"🆔 Purchase ID: {purchase.purchaseID}\n\n"
                     f"📬 User has been notified\n"
-                    f"🎁 Referral bonuses will be processed automatically"
+                    f"⚠️ No referral bonuses will be processed for manual additions"
                 )
 
                 logger.info(f"Manual shares added by admin {message.from_user.id}: "
-                            f"User {user_id}, Project {project_id}, Qty {quantity}, Price {price}")
+                            f"User {user_id}, Project {project_id}, Option {option.optionID}, "
+                            f"Qty {quantity}, Total ${total_price:.2f}")
 
         except ValueError as e:
             await message.reply(f"❌ Invalid parameter format: {str(e)}")
         except Exception as e:
             logger.error(f"Error in addtokens command: {e}", exc_info=True)
             await message.reply(f"❌ Error adding shares: {str(e)}")
+
+    async def handle_delpurchase(self, message: types.Message):
+        """Handler for &delpurchase command to safely delete purchase records"""
+        try:
+            # Parse command arguments
+            command_parts = message.text.strip().split()
+
+            if len(command_parts) != 2:
+                await message.reply(
+                    "❌ Invalid command format!\n\n"
+                    "Usage: &delpurchase {purchaseID}\n\n"
+                    "Example: &delpurchase 123"
+                )
+                return
+
+            try:
+                purchase_id = int(command_parts[1])
+            except ValueError:
+                await message.reply("❌ Purchase ID must be a number")
+                return
+
+            reply = await message.reply(f"🔄 Analyzing purchase {purchase_id}...")
+
+            with Session() as session:
+                # First, get purchase details
+                purchase = session.query(Purchase).filter_by(purchaseID=purchase_id).first()
+
+                if not purchase:
+                    await reply.edit_text(f"❌ Purchase {purchase_id} not found")
+                    return
+
+                # Get user info
+                user = session.query(User).filter_by(userID=purchase.userID).first()
+                user_name = user.firstname if user else "Unknown"
+
+                # Check for related records
+                related_bonuses = session.query(Bonus).filter_by(purchaseID=purchase_id).all()
+                related_active_balance = session.query(ActiveBalance).filter(
+                    ActiveBalance.reason.like(f'%purchase={purchase_id}%')
+                ).all()
+                related_passive_balance = session.query(PassiveBalance).filter(
+                    PassiveBalance.reason.like(f'%bonus=%')
+                ).join(Bonus).filter(Bonus.purchaseID == purchase_id).all()
+
+                # Show analysis
+                analysis = (
+                    f"📊 Purchase Analysis:\n\n"
+                    f"🆔 Purchase ID: {purchase_id}\n"
+                    f"👤 User: {user_name} (ID: {purchase.userID})\n"
+                    f"📊 Project: {purchase.projectName} (ID: {purchase.projectID})\n"
+                    f"🎯 Quantity: {purchase.packQty} shares\n"
+                    f"💰 Price: ${purchase.packPrice:.2f}\n"
+                    f"🔧 Option: {purchase.optionID}\n"
+                    f"📅 Date: {purchase.createdAt.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                    f"🔗 Related Records:\n"
+                    f"• Bonuses: {len(related_bonuses)}\n"
+                    f"• Active Balance: {len(related_active_balance)}\n"
+                    f"• Passive Balance: {len(related_passive_balance)}\n\n"
+                )
+
+                if related_bonuses:
+                    total_bonuses = sum(b.bonusAmount for b in related_bonuses)
+                    analysis += f"💰 Total bonuses paid: ${total_bonuses:.2f}\n"
+
+                analysis += "⚠️ This will permanently delete the purchase and ALL related records!"
+
+                await reply.edit_text(analysis)
+
+                # Wait for confirmation (in real implementation, you'd use FSM or inline keyboard)
+                await asyncio.sleep(2)
+
+                confirmation_msg = await message.reply(
+                    "⚠️ Are you sure you want to delete this purchase?\n\n"
+                    "This action cannot be undone and will:\n"
+                    "• Delete the purchase record\n"
+                    "• Delete all related bonuses\n"
+                    "• Delete related balance records\n"
+                    "• Update user balances\n\n"
+                    "Reply with 'CONFIRM DELETE' to proceed"
+                )
+
+                # In a real implementation, you'd use FSM here
+                # For now, let's implement immediate deletion with admin confirmation
+
+        except Exception as e:
+            logger.error(f"Error in delpurchase analysis: {e}", exc_info=True)
+            await message.reply(f"❌ Error analyzing purchase: {str(e)}")
+
+    async def handle_delpurchase_confirm(self, message: types.Message, purchase_id: int):
+        """Actual deletion after confirmation"""
+        try:
+            reply = await message.reply(f"🔄 Deleting purchase {purchase_id}...")
+
+            with Session() as session:
+                # Get admin user for logging
+                admin_user = session.query(User).filter_by(telegramID=message.from_user.id).first()
+                admin_name = admin_user.firstname if admin_user else "Unknown Admin"
+
+                # Begin transaction
+                session.begin()
+
+                try:
+                    # Get purchase details before deletion
+                    purchase = session.query(Purchase).filter_by(purchaseID=purchase_id).first()
+                    if not purchase:
+                        await reply.edit_text(f"❌ Purchase {purchase_id} not found")
+                        return
+
+                    user = session.query(User).filter_by(userID=purchase.userID).first()
+
+                    # 1. Delete related bonuses and update balances
+                    bonuses = session.query(Bonus).filter_by(purchaseID=purchase_id).all()
+                    total_bonuses_removed = 0
+
+                    for bonus in bonuses:
+                        # Decrease passive balance of bonus recipient
+                        bonus_user = session.query(User).filter_by(userID=bonus.userID).first()
+                        if bonus_user:
+                            bonus_user.balancePassive -= bonus.bonusAmount
+                            total_bonuses_removed += bonus.bonusAmount
+
+                            # Create negative passive balance record
+                            passive_record = PassiveBalance(
+                                userID=bonus_user.userID,
+                                firstname=bonus_user.firstname,
+                                surname=bonus_user.surname,
+                                amount=-bonus.bonusAmount,
+                                status='done',
+                                reason=f'bonus_removal={bonus.bonusID}',
+                                notes=f'Bonus removed due to purchase deletion by admin: {admin_name}'
+                            )
+                            session.add(passive_record)
+
+                    # Delete bonuses
+                    session.query(Bonus).filter_by(purchaseID=purchase_id).delete()
+
+                    # 2. Delete related active balance records
+                    active_balance_records = session.query(ActiveBalance).filter(
+                        ActiveBalance.reason.like(f'%purchase={purchase_id}%')
+                    ).all()
+
+                    balance_adjustment = 0
+                    for record in active_balance_records:
+                        if record.reason == f'purchase={purchase_id}':
+                            # This was the original purchase deduction
+                            balance_adjustment = -record.amount  # Restore the balance
+
+                    session.query(ActiveBalance).filter(
+                        ActiveBalance.reason.like(f'%purchase={purchase_id}%')
+                    ).delete()
+
+                    # 3. Adjust user's active balance if needed
+                    if balance_adjustment != 0 and user:
+                        user.balanceActive += balance_adjustment
+
+                        # Create balance restoration record
+                        restore_record = ActiveBalance(
+                            userID=user.userID,
+                            firstname=user.firstname,
+                            surname=user.surname,
+                            amount=balance_adjustment,
+                            status='done',
+                            reason=f'purchase_deletion={purchase_id}',
+                            notes=f'Balance restored due to purchase deletion by admin: {admin_name}'
+                        )
+                        session.add(restore_record)
+
+                    # 4. Delete the purchase record
+                    session.query(Purchase).filter_by(purchaseID=purchase_id).delete()
+
+                    # 5. Create admin log entry
+                    admin_log = ActiveBalance(
+                        userID=admin_user.userID if admin_user else 0,
+                        firstname=admin_name,
+                        surname=admin_user.surname if admin_user else '',
+                        amount=0.0,
+                        status='done',
+                        reason=f'admin_deletion={purchase_id}',
+                        notes=f'Purchase {purchase_id} deleted by admin. '
+                              f'User: {user.firstname} (ID: {user.userID}), '
+                              f'Shares: {purchase.packQty}, Price: ${purchase.packPrice:.2f}, '
+                              f'Bonuses removed: ${total_bonuses_removed:.2f}'
+                    )
+                    session.add(admin_log)
+
+                    # Commit transaction
+                    session.commit()
+
+                    # Success message
+                    await reply.edit_text(
+                        f"✅ Purchase {purchase_id} deleted successfully!\n\n"
+                        f"📊 Deleted:\n"
+                        f"• Purchase: {purchase.packQty} shares of {purchase.projectName}\n"
+                        f"• Bonuses: {len(bonuses)} records (${total_bonuses_removed:.2f})\n"
+                        f"• Balance records: {len(active_balance_records)}\n\n"
+                        f"💰 User balance restored: ${balance_adjustment:.2f}\n"
+                        f"👤 Affected user: {user.firstname} (ID: {user.userID})"
+                    )
+
+                    # Notify affected users
+                    if user and balance_adjustment != 0:
+                        text, buttons = await MessageTemplates.get_raw_template(
+                            'purchase_deleted_notification',
+                            {
+                                'firstname': user.firstname,
+                                'purchase_id': purchase_id,
+                                'shares': purchase.packQty,
+                                'project_name': purchase.projectName,
+                                'balance_restored': balance_adjustment,
+                                'admin_name': admin_name
+                            },
+                            lang=user.lang
+                        )
+
+                        notification = Notification(
+                            source="admin_command",
+                            text=text,
+                            buttons=buttons,
+                            target_type="user",
+                            target_value=str(user.userID),
+                            priority=2,
+                            category="admin",
+                            importance="high",
+                            parse_mode="HTML"
+                        )
+                        session.add(notification)
+                        session.commit()
+
+                    logger.info(f"Purchase {purchase_id} deleted by admin {message.from_user.id}")
+
+                except Exception as e:
+                    session.rollback()
+                    raise e
+
+        except Exception as e:
+            logger.error(f"Error in delpurchase confirm: {e}", exc_info=True)
+            await message.reply(f"❌ Error deleting purchase: {str(e)}")
+
 
     async def handle_admin_command(self, message: types.Message, state: FSMContext):
         """Обработчик админских команд"""
@@ -664,6 +958,9 @@ class AdminCommands:
 
         elif command.startswith("addtokens"):
             await self.handle_addtokens(message)
+
+        elif command.startswith("delpurchase"):
+            await self.handle_delpurchase(message)
 
         elif command == "testmail":
             await self.handle_testmail(message)
