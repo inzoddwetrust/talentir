@@ -346,9 +346,13 @@ class AdminCommands:
                                       f"🔐 Пробуем аутентификацию...")
 
                 try:
-                    # Пробуем starttls только если соединение не защищено
-                    if not smtp.is_connected_using_tls:
+                    try:
                         await smtp.starttls()
+                    except Exception as e:
+                        # Если TLS уже активен, просто продолжаем
+                        if "already using TLS" not in str(e):
+                            raise
+
                     await smtp.login(config.SMTP_USER, config.SMTP_PASSWORD)
                     await reply.edit_text(f"📋 Конфигурация SMTP:\n{config_text}\n\n"
                                           f"✅ Подключение установлено\n"
