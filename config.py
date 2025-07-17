@@ -152,6 +152,11 @@ PROJECT_DOCUMENTS = {
     "faq": "project-faq"
 }
 
+SMTP_HOST = os.getenv("SMTP_HOST", "mail.talentir.info")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "noreply@talentir.info")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+
 # Email settings для Postmark
 EMAIL_FROM = os.getenv("EMAIL_FROM", "noreply@talentir.info")
 EMAIL_FROM_NAME = os.getenv("EMAIL_FROM_NAME", "Talentir")

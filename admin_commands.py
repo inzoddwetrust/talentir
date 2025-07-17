@@ -16,6 +16,7 @@ from google_services import get_google_services
 from sqlalchemy import func
 from database import Payment, Notification, User
 from init import Session
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -154,86 +155,160 @@ class AdminCommands:
             await message.reply(error_msg)
 
     async def handle_testmail(self, message: types.Message):
-        """Обработчик команды &testmail для тестирования email"""
+        """Обработчик команды &testmail для тестирования всех email провайдеров"""
         try:
-            reply = await message.reply("🔄 Тестируем Postmark...")
+            reply = await message.reply("🔄 Тестируем email систему...")
 
             from email_sender import email_manager
 
-            # Проверяем подключение
-            connected = await email_manager.test_connection()
-            if not connected:
-                await reply.edit_text("❌ Не могу подключиться к Postmark. Проверьте POSTMARK_API_TOKEN")
+            # Проверяем наличие провайдеров
+            if not email_manager.providers:
+                await reply.edit_text("❌ Нет настроенных email провайдеров!\n\n"
+                                      "Проверьте настройки:\n"
+                                      "• POSTMARK_API_TOKEN\n"
+                                      "• SMTP_HOST, SMTP_USER, SMTP_PASSWORD")
                 return
 
-            # Пробуем отправить тестовое письмо самому админу
+            # Показываем список провайдеров
+            provider_list = []
+            for i, provider in enumerate(email_manager.providers):
+                provider_list.append(f"{i + 1}. {provider.__class__.__name__}")
+
+            provider_text = "\n".join(provider_list)
+            await reply.edit_text(
+                f"📋 Найдено провайдеров: {len(email_manager.providers)}\n{provider_text}\n\n🔗 Тестируем подключения...")
+
+            # Получаем детальный статус всех провайдеров
+            providers_status = await email_manager.get_providers_status()
+
+            # Формируем отчет о статусе
+            status_report = []
+            working_providers = 0
+
+            for provider_name, is_working in providers_status.items():
+                if is_working:
+                    status_report.append(f"✅ {provider_name}: OK")
+                    working_providers += 1
+                else:
+                    status_report.append(f"❌ {provider_name}: FAILED")
+
+            status_text = "\n".join(status_report)
+
+            if working_providers == 0:
+                await reply.edit_text(f"❌ Все провайдеры недоступны!\n\n{status_text}\n\n"
+                                      "Проверьте:\n"
+                                      "• Postmark API токен\n"
+                                      "• SMTP настройки\n"
+                                      "• Интернет соединение")
+                return
+
+            # Получаем email админа для тестирования
             with Session() as session:
                 user = session.query(User).filter_by(telegramID=message.from_user.id).first()
                 if not user or not user.email:
-                    await reply.edit_text("❌ У вас не указан email. Сначала заполните данные через /fill_user_data")
+                    await reply.edit_text(f"📊 Статус провайдеров:\n{status_text}\n\n"
+                                          f"✅ Работающих: {working_providers}/{len(providers_status)}\n\n"
+                                          "❌ Не могу отправить тест-письмо!\n"
+                                          "У вас не указан email. Заполните данные через /fill_user_data")
                     return
 
-                # Модифицируем email_manager для получения подробной ошибки
+                # Отправляем тестовое письмо
+                await reply.edit_text(f"📊 Статус провайдеров:\n{status_text}\n\n"
+                                      f"✅ Работающих: {working_providers}/{len(providers_status)}\n\n"
+                                      f"📤 Отправляем тест-письмо на {user.email}...")
+
                 try:
                     success = await email_manager.send_notification_email(
                         to=user.email,
-                        subject="Talentir Test Email",
-                        body="<h1>Тест Postmark</h1><p>Если вы видите это письмо - email работает!</p>"
+                        subject="🧪 Talentir Email System Test",
+                        body=f"""
+                        <html>
+                        <body>
+                            <h2>🎉 Email система работает!</h2>
+                            <p>Привет, <strong>{user.firstname}</strong>!</p>
+                            <p>Если вы видите это письмо, значит наша email система функционирует корректно.</p>
+
+                            <hr>
+
+                            <h3>📊 Информация о системе:</h3>
+                            <ul>
+                                <li><strong>Провайдеров настроено:</strong> {len(email_manager.providers)}</li>
+                                <li><strong>Работающих провайдеров:</strong> {working_providers}</li>
+                                <li><strong>Время тестирования:</strong> {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC</li>
+                            </ul>
+
+                            <h3>🔧 Статус провайдеров:</h3>
+                            <ul>
+                                {"".join([f"<li>{'✅' if status else '❌'} {name}</li>" for name, status in providers_status.items()])}
+                            </ul>
+
+                            <hr>
+                            <p><small>Это автоматически сгенерированное письмо от Talentir Bot.</small></p>
+                        </body>
+                        </html>
+                        """
                     )
 
                     if success:
-                        await reply.edit_text(f"✅ Тестовое письмо отправлено на {user.email}")
+                        await reply.edit_text(f"🎯 Email система протестирована!\n\n"
+                                              f"📊 Статус провайдеров:\n{status_text}\n\n"
+                                              f"✅ Работающих: {working_providers}/{len(providers_status)}\n\n"
+                                              f"📧 Тест-письмо отправлено на {user.email}\n"
+                                              f"📬 Проверьте почту (включая спам)!")
                     else:
-                        # Получаем последнюю ошибку из логов или делаем дополнительный запрос
-                        error_details = await self._get_postmark_error_details(user.email)
-                        await reply.edit_text(f"❌ Ошибка отправки на {user.email}\n\n{error_details}")
+                        # Получаем подробности ошибки
+                        error_details = await self._get_email_error_details(user.email, providers_status)
+                        await reply.edit_text(f"📊 Статус провайдеров:\n{status_text}\n\n"
+                                              f"✅ Работающих: {working_providers}/{len(providers_status)}\n\n"
+                                              f"❌ Ошибка отправки на {user.email}\n\n"
+                                              f"{error_details}")
 
                 except Exception as send_error:
-                    await reply.edit_text(f"❌ Ошибка отправки на {user.email}\n\nПодробности: {str(send_error)}")
+                    await reply.edit_text(f"📊 Статус провайдеров:\n{status_text}\n\n"
+                                          f"✅ Работающих: {working_providers}/{len(providers_status)}\n\n"
+                                          f"❌ Критическая ошибка отправки на {user.email}\n\n"
+                                          f"Подробности: {str(send_error)}")
 
         except Exception as e:
-            await message.reply(f"❌ Ошибка: {str(e)}")
+            await message.reply(f"❌ Ошибка тестирования email системы: {str(e)}")
             logger.error(f"Error in testmail command: {e}", exc_info=True)
 
-    async def _get_postmark_error_details(self, email: str) -> str:
-        """Получает подробности ошибки Postmark"""
+    async def _get_email_error_details(self, email: str, providers_status: dict) -> str:
+        """Получает подробности ошибки email отправки"""
         try:
-            from email_sender import email_manager
+            details = ["🔍 Диагностика ошибки:"]
 
-            # Делаем тестовый запрос для получения конкретной ошибки
-            import aiohttp
+            # Анализ статуса провайдеров
+            working_count = sum(1 for status in providers_status.values() if status)
 
-            data = {
-                "From": f"{config.EMAIL_FROM_NAME} <{config.EMAIL_FROM}>",
-                "To": email,
-                "Subject": "Test",
-                "HtmlBody": "<p>Test</p>",
-                "MessageStream": "outbound"
-            }
+            if working_count == 0:
+                details.append("• Все провайдеры недоступны")
+                details.append("• Проверьте настройки API токенов")
+                details.append("• Проверьте интернет соединение")
+            else:
+                details.append(f"• {working_count} провайдер(ов) доступны")
+                details.append("• Возможная проблема с email адресом")
 
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                        f"{email_manager.provider.base_url}/email",
-                        headers=email_manager.provider.headers,
-                        json=data
-                ) as response:
-                    response_data = await response.json()
+            # Проверка конфигурации
+            config_issues = []
+            if not hasattr(config, 'POSTMARK_API_TOKEN') or not config.POSTMARK_API_TOKEN:
+                config_issues.append("POSTMARK_API_TOKEN не настроен")
 
-                    if response.status != 200:
-                        error_code = response_data.get('ErrorCode', 'Unknown')
-                        error_message = response_data.get('Message', 'Unknown error')
+            if not (hasattr(config, 'SMTP_HOST') and config.SMTP_HOST):
+                config_issues.append("SMTP_HOST не настроен")
 
-                        # Специальные сообщения для частых ошибок
-                        if error_code == 412:
-                            return f"🔒 Аккаунт Postmark не подтвержден\n\nОшибка {error_code}: {error_message}\n\n💡 Решение: Подтвердите аккаунт в панели Postmark или используйте email на домене talentir.info"
-                        elif error_code == 422:
-                            return f"📧 Домен отправителя не верифицирован\n\nОшибка {error_code}: {error_message}\n\n💡 Решение: Верифицируйте домен talentir.info в Postmark"
-                        elif error_code == 10:
-                            return f"🔑 Неверный API токен\n\nОшибка {error_code}: {error_message}\n\n💡 Решение: Проверьте POSTMARK_API_TOKEN в .env"
-                        else:
-                            return f"❌ Ошибка {error_code}: {error_message}"
+            if config_issues:
+                details.append("\n⚙️ Проблемы конфигурации:")
+                for issue in config_issues:
+                    details.append(f"• {issue}")
 
-                    return "Неизвестная ошибка"
+            # Рекомендации
+            details.append("\n💡 Рекомендации:")
+            details.append("1. Проверьте .env файл")
+            details.append("2. Перезапустите бот после изменений")
+            details.append("3. Проверьте логи: journalctl -u talentir-bot -f")
+
+            return "\n".join(details)
 
         except Exception as e:
             return f"Не удалось получить подробности ошибки: {str(e)}"
