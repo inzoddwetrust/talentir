@@ -968,6 +968,7 @@ class AdminCommands:
         elif command == "testsmtp":
             await self.handle_testsmtp(message)
 
+
         elif command == "legacy":
 
             try:
@@ -984,25 +985,44 @@ class AdminCommands:
 
                 report = f"📊 Legacy Migration Report:\n\n"
 
-                report += f"📋 Total records: {stats['total_records']}\n"
+                report += f"📋 Total records: {stats.total_records}\n"
 
-                report += f"👤 Users found: {stats['users_found']}\n"
+                report += f"👤 Users found: {stats.users_found}\n"
 
-                report += f"👥 Upliners assigned: {stats['upliners_assigned']}\n"
+                report += f"👥 Upliners assigned: {stats.upliners_assigned}\n"
 
-                report += f"📈 Purchases created: {stats['purchases_created']}\n"
+                report += f"📈 Purchases created: {stats.purchases_created}\n"
 
-                report += f"✅ Completed: {stats['completed']}\n"
+                report += f"✅ Completed: {stats.completed}\n"
 
-                report += f"❌ Errors: {stats['errors']}\n\n"
+                report += f"❌ Errors: {stats.errors}\n"
 
-                if stats['users_found'] == 0 and stats['upliners_assigned'] == 0 and stats['purchases_created'] == 0:
+                # Добавляем информацию о дубликатах, если есть
+
+                if hasattr(stats, 'duplicate_purchases_prevented'):
+                    report += f"🛡️ Duplicate purchases prevented: {stats.duplicate_purchases_prevented}\n"
+
+                report += "\n"
+
+                if stats.users_found == 0 and stats.upliners_assigned == 0 and stats.purchases_created == 0:
 
                     report += "🔍 No new legacy users found to process."
 
                 else:
 
                     report += "🎯 Legacy migration processing completed!"
+
+                # Добавляем детали ошибок если они есть
+
+                if stats.errors > 0 and stats.error_details:
+
+                    report += f"\n\n❌ Error details (showing first 5):\n"
+
+                    for i, (email, error) in enumerate(stats.error_details[:5]):
+                        report += f"• {email}: {error}\n"
+
+                    if len(stats.error_details) > 5:
+                        report += f"... and {len(stats.error_details) - 5} more errors"
 
                 await reply.edit_text(report)
 

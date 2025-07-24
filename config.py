@@ -16,7 +16,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets"
 ]
 # Legacy migration sheet
-LEGACY_SHEET_ID = "1Rn7geruHGkUpv4Vk9wVvqo8i-rJ_WXqznVic7CKdGfY"
+LEGACY_SHEET_ID = "1mbaRSbOs0Hc98iJ3YnZnyqL5yxeSuPJCef5PFjPHpFg"
 
 # Telegram
 API_TOKEN = os.getenv("TELEGRAM_API_TOKEN")
