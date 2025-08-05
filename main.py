@@ -2637,47 +2637,134 @@ async def handle_admin_file(message: types.Message):
         logging.error(error_msg)
 
 
-@dp.callback_query_handler(lambda c: c.data.startswith("download_pdf_"), state=ProjectCarouselState.current_project_index)
+@dp.callback_query_handler(lambda c: c.data.startswith("download_pdf_"),
+                           state=ProjectCarouselState.current_project_index)
 @with_user
 async def download_project_pdf(user: User, callback_query: types.CallbackQuery, session: Session):
-    _, _, project_doc = callback_query.data.split("_")
-    if "~" in project_doc:
-        project_id, doc_id = project_doc.split("~")
-        project_id = int(project_id)
-    else:
-        project_id = int(project_doc)
-        doc_id = None
+    logger.info(f"Processing PDF download request: {callback_query.data}")
 
-    project = session.query(Project).filter(Project.projectID == project_id, Project.lang == user.lang).first()
-    if not project:
-        project = session.query(Project).filter(Project.projectID == project_id, Project.lang == 'en').first()
+    try:
+        # Разбираем callback_data
+        callback_parts = callback_query.data.split("_")
+        if len(callback_parts) < 3:
+            logger.warning(f"Invalid callback format: {callback_query.data}")
+            await callback_query.answer("Invalid request format!")
+            return
 
-    if project and project.linkPres:
+        project_doc = "_".join(callback_parts[2:])
+        logger.debug(f"Extracted project_doc: {project_doc}")
+
+        if "~" in project_doc:
+            project_id_str, doc_id = project_doc.split("~", 1)
+            project_id = int(project_id_str)
+            logger.debug(f"Parsed project_id: {project_id}, doc_id: {doc_id}")
+        else:
+            project_id = int(project_doc)
+            doc_id = None
+            logger.debug(f"Parsed project_id: {project_id}, no doc_id")
+
+        # Получаем проект
+        project = session.query(Project).filter(Project.projectID == project_id, Project.lang == user.lang).first()
+        if not project:
+            project = session.query(Project).filter(Project.projectID == project_id, Project.lang == 'en').first()
+
+        if not project:
+            logger.warning(f"Project {project_id} not found")
+            await callback_query.answer("Project not found!")
+            return
+
+        if not project.linkPres:
+            logger.warning(f"Project {project_id} has no linkPres data")
+            await callback_query.answer("No documents available!")
+            return
+
+        logger.info(f"Raw linkPres data: {repr(project.linkPres)}")
+
+        # Парсим ссылки
         link_pres = {}
         try:
             if ": " not in project.linkPres:
                 link_pres["default"] = project.linkPres.strip()
+                logger.debug(f"Single link format, using default: {link_pres['default']}")
             else:
                 cleaned_link_pres = project.linkPres.replace(",\n", ",").replace(", ", ",")
                 pairs = [pair.strip() for pair in cleaned_link_pres.split(",") if pair.strip()]
-                for pair in pairs:
-                    key, value = pair.split(": ")
-                    link_pres[key.strip()] = value.strip()
+                logger.debug(f"Found {len(pairs)} pairs to parse: {pairs}")
+
+                for i, pair in enumerate(pairs):
+                    if ": " in pair:
+                        key, value = pair.split(": ", 1)
+                        key, value = key.strip(), value.strip()
+                        link_pres[key] = value
+                        logger.debug(f"Pair {i}: '{key}' -> '{value}'")
+                    else:
+                        link_pres["default"] = pair.strip()
+                        logger.debug(f"Pair {i}: default -> '{pair.strip()}'")
+
+            logger.info(f"Parsed link_pres dictionary: {link_pres}")
+
+            # Определяем какую ссылку использовать
+            selected_key = None
+            file_identifier = None
 
             if doc_id and doc_id in link_pres:
-                await callback_query.answer("Downloading PDF...")
-                await bot.send_document(chat_id=callback_query.message.chat.id, document=link_pres[doc_id])
+                selected_key = doc_id
+                file_identifier = link_pres[doc_id]
             elif link_pres:
-                first_key = next(iter(link_pres))
-                await callback_query.answer("Downloading PDF...")
-                await bot.send_document(chat_id=callback_query.message.chat.id, document=link_pres[first_key])
+                selected_key = next(iter(link_pres))
+                file_identifier = link_pres[selected_key]
             else:
-                await callback_query.answer(f"No PDF found for doc_id={doc_id}!")
-        except ValueError as e:
-            print(f"Parsing error: {e}")
-            await callback_query.answer("Error processing PDF data!")
-    else:
-        await callback_query.answer("No PDF found!")
+                logger.error("No valid links found in parsed data")
+                await callback_query.answer("No documents found!")
+                return
+
+            logger.info(f"Selected key: '{selected_key}', file_identifier: '{file_identifier}'")
+
+            # Проверяем, что это похоже на Telegram file_id
+            def is_telegram_file_id(identifier):
+                # Telegram file_id обычно содержат только буквы, цифры, дефисы и подчеркивания
+                # и не содержат пробелы, кириллицу или другие специальные символы
+                if not identifier:
+                    return False
+                # Простая проверка на формат
+                allowed_chars = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_')
+                return all(c in allowed_chars for c in identifier) and len(identifier) > 10
+
+            if not is_telegram_file_id(file_identifier):
+                logger.error(f"File identifier '{file_identifier}' doesn't look like a valid Telegram file_id")
+                logger.error(f"File identifier length: {len(file_identifier)}")
+                logger.error(f"File identifier characters: {[ord(c) for c in file_identifier[:20]]}")
+                await callback_query.answer("Document format not supported. Please contact admin.")
+                return
+
+            # Отправляем документ
+            logger.info(f"Attempting to send document with file_id: {file_identifier}")
+            await callback_query.answer("Downloading PDF...")
+
+            try:
+                await bot.send_document(
+                    chat_id=callback_query.message.chat.id,
+                    document=file_identifier,
+                    caption=f"Document: {selected_key}" if selected_key != "default" else None
+                )
+                logger.info(f"Successfully sent document {file_identifier}")
+            except Exception as send_error:
+                logger.error(f"Failed to send document {file_identifier}: {send_error}")
+                await callback_query.message.answer(
+                    f"❌ Failed to send document. Error: {str(send_error)}\n"
+                    f"File ID: {file_identifier[:50]}..."
+                )
+
+        except ValueError as parse_error:
+            logger.error(f"Failed to parse linkPres data: {parse_error}")
+            logger.error(f"Raw linkPres: {repr(project.linkPres)}")
+            await callback_query.answer("Error processing document data!")
+
+    except Exception as e:
+        logger.error(f"Unexpected error in download_project_pdf: {e}", exc_info=True)
+        logger.error(f"Callback data: {callback_query.data}")
+        logger.error(f"User: {user.userID}")
+        await callback_query.answer("An error occurred while processing your request!")
 
 
 @dp.callback_query_handler(lambda c: c.data == "/dashboard/existingUser", state="*")

@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -10,7 +10,6 @@ from database import User, Project, Purchase, ActiveBalance, Notification, Optio
 from init import Session
 from templates import MessageTemplates
 import helpers
-import config
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +71,25 @@ class LegacyUserProcessor:
         self.check_interval = check_interval
         self.batch_size = batch_size
         self._running = False
+
+    @staticmethod
+    def normalize_email(email: str) -> str:
+        """
+        Универсальная нормализация email для case-insensitive поиска.
+        Для Gmail также убирает точки в локальной части.
+        """
+        if not email:
+            return ""
+
+        email = email.lower().strip()
+
+        # Специальная обработка для Gmail
+        if '@gmail.com' in email:
+            local, domain = email.split('@', 1)
+            local = local.replace('.', '')  # Убираем точки
+            return f"{local}@{domain}"
+
+        return email
 
     async def start(self):
         if self._running:
@@ -249,6 +267,7 @@ class LegacyUserProcessor:
         """
         Получает пользователя из БД по legacy записи.
         Поддерживает как старый формат (is_found="1"), так и новый (is_found=userID).
+        Теперь с нормализацией email для case-insensitive поиска.
         """
         if not user.is_found or user.is_found in ["", "0"]:
             return None
@@ -262,8 +281,15 @@ class LegacyUserProcessor:
                 logger.warning(f"Invalid userID format in is_found: {user.is_found}")
                 return None
 
-        # Старый формат: is_found="1", ищем по email
-        return session.query(User).filter_by(email=user.email).first()
+        # Старый формат: is_found="1", ищем по email с нормализацией
+        normalized_search_email = self.normalize_email(user.email)
+        users_with_email = session.query(User).filter(User.email.isnot(None)).all()
+
+        for u in users_with_email:
+            if self.normalize_email(u.email) == normalized_search_email:
+                return u
+
+        return None
 
     async def _process_single_user(self, session: Session, user: LegacyUserRecord) -> bool:
         progress_made = False
@@ -298,7 +324,18 @@ class LegacyUserProcessor:
 
     async def _find_user(self, session: Session, user: LegacyUserRecord) -> bool:
         try:
-            db_user = session.query(User).filter_by(email=user.email).first()
+            # Нормализация email для поиска (case-insensitive)
+            normalized_search_email = self.normalize_email(user.email)
+
+            # Поиск пользователя с нормализованным email
+            users_with_email = session.query(User).filter(User.email.isnot(None)).all()
+            db_user = None
+
+            for u in users_with_email:
+                if self.normalize_email(u.email) == normalized_search_email:
+                    db_user = u
+                    break
+
             if not db_user:
                 logger.debug(f"User {user.email} not found in database")
                 return False
@@ -327,30 +364,20 @@ class LegacyUserProcessor:
                 logger.debug(f"No upliner specified for user {user.email}")
                 return False
 
-            # ИСПРАВЛЕНИЕ: получаем пользователя правильным способом
+            # Получаем пользователя правильным способом
             db_user = self._get_user_from_legacy_record(session, user)
             if not db_user:
                 logger.debug(f"User {user.email} not found yet, will try again later")
                 return False
 
-            # Нормализация Gmail адреса
-            def normalize_gmail(email):
-                if not email:
-                    return ""
-                email = email.lower().strip()
-                if '@gmail.com' in email:
-                    local, domain = email.split('@', 1)
-                    local = local.replace('.', '')  # Убираем точки
-                    return f"{local}@{domain}"
-                return email
-
-            normalized_upliner_email = normalize_gmail(user.upliner)
+            # Используем универсальную нормализацию email
+            normalized_upliner_email = self.normalize_email(user.upliner)
 
             # Ищем по нормализованному email (только пользователи с email)
             users_with_email = session.query(User).filter(User.email.isnot(None)).all()
             upliner = None
             for u in users_with_email:
-                if normalize_gmail(u.email) == normalized_upliner_email:
+                if self.normalize_email(u.email) == normalized_upliner_email:
                     upliner = u
                     break
 
