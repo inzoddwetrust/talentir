@@ -1324,7 +1324,7 @@ async def resend_verification_email(user: User, callback_query: types.CallbackQu
             template_key='email_resend_cooldown',
             update=callback_query,
             variables={'remaining_minutes': remaining_minutes},
-            edit=True
+            delete_original=True  # <-- Удаляем медиа-сообщение вместо редактирования
         )
         return
 
@@ -1355,14 +1355,14 @@ async def resend_verification_email(user: User, callback_query: types.CallbackQu
             template_key='email_resend_success',
             update=callback_query,
             variables={'email': user.email},
-            edit=True
+            delete_original=True  # <-- Удаляем медиа-сообщение вместо редактирования
         )
     else:
         await message_manager.send_template(
             user=user,
             template_key='email_resend_failed',
             update=callback_query,
-            edit=True
+            delete_original=True  # <-- Удаляем медиа-сообщение вместо редактирования
         )
 
 
