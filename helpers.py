@@ -3,6 +3,7 @@ from database import User
 import logging
 from aiogram.types import Message, CallbackQuery
 from config import REQUIRED_CHANNELS
+from datetime import datetime
 
 
 def get_user_note(user: User, key: str) -> Optional[str]:
@@ -113,6 +114,59 @@ async def check_user_subscriptions(bot, user_id: int, user_lang: str = "en") -> 
             logging.error(f"Error checking subscription for {channel['chat_id']}: {e}")
 
     return len(not_subscribed) == 0, not_subscribed
+
+
+def is_email_confirmed(user: User) -> bool:
+    """
+    Check if user's email is confirmed.
+    Returns True only if emailConfirmed is explicitly set to '1' in user notes.
+
+    Args:
+        user: User object
+
+    Returns:
+        bool: True if email is confirmed, False otherwise
+    """
+    email_confirmed = get_user_note(user, 'emailConfirmed')
+    return email_confirmed == '1'  # Explicitly check for '1', not just truthy
+
+
+def set_email_last_sent(user: User, timestamp: datetime) -> None:
+    """Set timestamp of last email sent in user notes"""
+    set_user_note(user, 'emailLastSent', str(int(timestamp.timestamp())))
+
+
+def get_email_last_sent(user: User) -> Optional[datetime]:
+    """Get timestamp of last email sent from user notes"""
+    timestamp_str = get_user_note(user, 'emailLastSent')
+    if not timestamp_str:
+        return None
+    try:
+        return datetime.fromtimestamp(int(timestamp_str))
+    except (ValueError, TypeError):
+        return None
+
+
+def can_resend_email(user: User, cooldown_minutes: int = 5) -> Tuple[bool, Optional[int]]:
+    """
+    Check if user can resend email (cooldown check)
+
+    Returns:
+        Tuple[bool, Optional[int]]: (can_send, remaining_seconds)
+    """
+    last_sent = get_email_last_sent(user)
+    if not last_sent:
+        return True, None
+
+    now = datetime.utcnow()
+    elapsed = now - last_sent
+    cooldown_seconds = cooldown_minutes * 60
+
+    if elapsed.total_seconds() >= cooldown_seconds:
+        return True, None
+
+    remaining = cooldown_seconds - int(elapsed.total_seconds())
+    return False, remaining
 
 
 class FakeMessage:

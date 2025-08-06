@@ -1243,6 +1243,9 @@ async def confirm_user_data(callback_query: types.CallbackQuery, state: FSMConte
             email_sent = await email_manager.send_verification_email(user, verification_link)
 
             if email_sent:
+                # Set timestamp of email sending for cooldown tracking
+                helpers.set_email_last_sent(user, datetime.utcnow())
+
                 await message_manager.send_template(
                     user=user,
                     template_key='user_data_saved_email_sent',
@@ -1285,6 +1288,82 @@ async def go_back(callback_query: types.CallbackQuery, state: FSMContext):
 @dp.callback_query_handler(lambda c: c.data == "cancel_user_data", state=UserDataDialog.states)
 async def cancel_user_data(callback_query: types.CallbackQuery, state: FSMContext):
     await UserDataManager.handle_navigation(callback_query, state, 'cancel')
+
+
+@dp.callback_query_handler(lambda c: c.data == "edit_user_data", state="*")
+@with_user
+async def edit_user_data(user: User, callback_query: types.CallbackQuery, session: Session, state: FSMContext):
+    """Handle edit user data request - restart user data collection dialog"""
+
+    # Check if user data is filled but email not confirmed
+    if not user.isFilled or helpers.is_email_confirmed(user):
+        await callback_query.answer("Invalid request", show_alert=True)
+        return
+
+    # Start user data collection dialog from the beginning
+    await UserDataManager.start_user_data_dialog(callback_query, state)
+
+
+@dp.callback_query_handler(lambda c: c.data == "resend_verification_email", state="*")
+@with_user
+async def resend_verification_email(user: User, callback_query: types.CallbackQuery, session: Session):
+    """Handle resend verification email request with cooldown check"""
+
+    # Check if user data is filled but email not confirmed
+    if not user.isFilled or helpers.is_email_confirmed(user):
+        await callback_query.answer("Invalid request", show_alert=True)
+        return
+
+    # Check cooldown
+    can_send, remaining_seconds = helpers.can_resend_email(user, cooldown_minutes=5)
+
+    if not can_send:
+        remaining_minutes = remaining_seconds // 60 + (1 if remaining_seconds % 60 else 0)
+        await message_manager.send_template(
+            user=user,
+            template_key='email_resend_cooldown',
+            update=callback_query,
+            variables={'remaining_minutes': remaining_minutes},
+            edit=True
+        )
+        return
+
+    # Get or generate verification token
+    verification_token = helpers.get_user_note(user, 'verificationToken')
+
+    # ВАЖНО: Для legacy пользователей генерируем новый токен
+    if not verification_token:
+        from userdatamanager import generate_verification_token
+        verification_token = generate_verification_token()
+        helpers.set_user_note(user, 'verificationToken', verification_token)
+        helpers.set_user_note(user, 'emailConfirmed', '0')  # Убеждаемся, что статус правильный
+        session.commit()
+
+    # Send verification email
+    from email_sender import email_manager
+    verification_link = f"https://t.me/{BOT_USERNAME}?start=emailverif_{verification_token}"
+
+    email_sent = await email_manager.send_verification_email(user, verification_link)
+
+    if email_sent:
+        # Update last sent timestamp
+        helpers.set_email_last_sent(user, datetime.utcnow())
+        session.commit()
+
+        await message_manager.send_template(
+            user=user,
+            template_key='email_resend_success',
+            update=callback_query,
+            variables={'email': user.email},
+            edit=True
+        )
+    else:
+        await message_manager.send_template(
+            user=user,
+            template_key='email_resend_failed',
+            update=callback_query,
+            edit=True
+        )
 
 
 # endregion
@@ -2432,6 +2511,8 @@ async def get_settings_template_keys(user: User) -> list:
 
     if not user.isFilled:
         template_keys.append('settings_unfilled_data')
+    elif user.isFilled and not helpers.is_email_confirmed(user):
+        template_keys.append('settings_filled_unconfirmed')
 
     template_keys.append('settings_language')
 
