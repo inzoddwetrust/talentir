@@ -117,8 +117,8 @@ async def _verify_bsc_transaction(txid: str) -> Optional[Tuple[str, str]]:
     """Verifies BSC transaction."""
     url = "https://api.bscscan.com/api"
     params = {
-        "module": "transaction",
-        "action": "gettxinfo",
+        "module": "proxy",
+        "action": "eth_getTransactionByHash",
         "txhash": txid,
         "apikey": config.BSCSCAN_API_KEY
     }
@@ -127,8 +127,15 @@ async def _verify_bsc_transaction(txid: str) -> Optional[Tuple[str, str]]:
         async with session.get(url, params=params) as response:
             if response.status == 200:
                 data = await response.json()
-                if data.get("status") == "1" and data.get("result"):
-                    return data["result"]["from"], data["result"]["to"]
+                if data.get("result") and data["result"] is not None:
+                    # Check if transaction exists (result is not None)
+                    tx_data = data["result"]
+                    # Extract from and to addresses
+                    from_address = tx_data.get("from")
+                    to_address = tx_data.get("to")
+
+                    if from_address and to_address:
+                        return from_address, to_address
     return None
 
 
