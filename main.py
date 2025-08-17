@@ -1370,13 +1370,32 @@ async def resend_verification_email(user: User, callback_query: types.CallbackQu
 
 # region Carousel
 async def get_project_by_id(session: Session, project_id: int, user_lang: str):
-    """Получает проект по ID с учетом языка пользователя"""
-    return (session.query(Project)
-            .filter(Project.projectID == project_id, Project.lang == user_lang)
-            .first() or
-            session.query(Project)
-            .filter(Project.projectID == project_id, Project.lang == 'en')
-            .first())
+    """Получает проект по ID с учетом языка пользователя и проверкой статуса"""
+
+    # Пробуем найти на языке пользователя
+    project = session.query(Project).filter(
+        Project.projectID == project_id,
+        Project.lang == user_lang
+    ).first()
+
+    # Если нашли, проверяем статус
+    if project:
+        if project.status in ['active', 'child']:
+            return project
+        else:
+            return None  # Проект выключен
+
+    # Если не нашли на языке пользователя, пробуем английский
+    project = session.query(Project).filter(
+        Project.projectID == project_id,
+        Project.lang == 'en'
+    ).first()
+
+    # Проверяем статус английской версии
+    if project and project.status in ['active', 'child']:
+        return project
+
+    return None
 
 
 @dp.callback_query_handler(lambda c: c.data == "/projects", state="*")

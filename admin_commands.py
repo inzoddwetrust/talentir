@@ -104,6 +104,45 @@ class AdminCommands:
             else:
                 await message.reply(error_msg)
 
+    async def handle_clearprojects(self, message: types.Message):
+        """Команда &clearprojects - полная очистка и переимпорт проектов"""
+        reply = await message.reply("⚠️ ВНИМАНИЕ! Очищаю таблицу projects...")
+
+        try:
+            with Session() as session:
+                # Отключаем проверку внешних ключей
+                session.execute("PRAGMA foreign_keys = OFF")
+
+                # Удаляем все проекты
+                session.query(Project).delete()
+                session.commit()
+
+                # Включаем проверку обратно
+                session.execute("PRAGMA foreign_keys = ON")
+
+                await reply.edit_text("✅ Таблица projects очищена. Начинаю импорт...")
+
+                # Импортируем новые данные
+                sheets_client, _ = get_google_services()
+                sheet = sheets_client.open_by_key(config.GOOGLE_SHEET_ID).worksheet("Projects")
+
+                importer = ProjectImporter()
+                stats = await importer.import_sheet(sheet)
+
+                report = (
+                    f"✅ Импорт завершен:\n"
+                    f"Всего строк: {stats.total}\n"
+                    f"Добавлено: {stats.added}\n"
+                    f"Ошибок: {stats.errors}"
+                )
+
+                await reply.edit_text(report)
+
+        except Exception as e:
+            error_msg = f"❌ Ошибка: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            await reply.edit_text(error_msg)
+
     async def handle_upconfig(self, message: types.Message):
         """Обработчик команды &upconfig для обновления конфигурации из Google Sheets"""
         try:
@@ -968,6 +1007,8 @@ class AdminCommands:
         elif command == "testsmtp":
             await self.handle_testsmtp(message)
 
+        elif command == "clearprojects":
+            await self.handle_clearprojects(message)
 
         elif command == "legacy":
 

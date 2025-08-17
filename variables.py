@@ -97,9 +97,13 @@ async def update_purchases_total():
 
 
 async def update_projects_count():
-    """Количество уникальных проектов"""
+    """Количество активных уникальных проектов"""
     with Session() as session:
-        return session.query(func.count(func.distinct(Project.projectID))).scalar()
+        return session.query(
+            func.count(func.distinct(Project.projectID))
+        ).filter(
+            Project.status.in_(["active", "child"])
+        ).scalar()
 
 
 async def update_active_users():
@@ -137,31 +141,16 @@ async def update_admin_links():
 
 
 async def update_sorted_projects() -> List[int]:
-    """Возвращает список project_ids, отсортированный по рейтингу, только для активных проектов"""
+    """Возвращает список project_ids в порядке поля rate"""
     with Session() as session:
+        # Получаем проекты, отсортированные по rate
+        projects = session.query(Project.projectID).filter(
+            Project.status.in_(["active", "child"])
+        ).group_by(Project.projectID).order_by(
+            func.min(func.coalesce(Project.rate, 999))  # Берем минимальный rate среди языковых версий
+        ).all()
 
-        projects = session.query(
-            Project.projectID,
-            func.coalesce(Project.rate, 999).label('effective_rate')
-        ).filter(
-            Project.status.in_(["active", "child"])  # Фильтруем активные и child проекты
-        ).distinct().all()
-
-        # Группируем проекты по рейтингу
-        rating_groups = {}
-        for pid, rate in projects:
-            if rate not in rating_groups:
-                rating_groups[rate] = []
-            rating_groups[rate].append(pid)
-
-        # Перемешиваем проекты с одинаковым рейтингом и формируем финальный список
-        sorted_projects = []
-        for rate in sorted(rating_groups.keys()):  # Сортируем по возрастанию рейтинга
-            project_ids = rating_groups[rate]
-            random.shuffle(project_ids)  # Случайный порядок для проектов с одинаковым рейтингом
-            sorted_projects.extend(project_ids)
-
-        return sorted_projects
+        return [pid for (pid,) in projects]
 
 
 def initialize_variables():

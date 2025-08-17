@@ -11,9 +11,10 @@ logger = logging.getLogger(__name__)
 
 
 class InvoiceCleaner:
-    def __init__(self, bot_username: str, check_interval: int = 900):
+    def __init__(self, bot_username: str, check_interval: int = 300):  # Уменьшили с 900 до 300 (5 минут)
         self.bot_username = bot_username
         self.check_interval = check_interval
+        self._running = False
 
     def format_remaining_time(self, remaining: timedelta) -> str:
         return str(int(remaining.total_seconds() / 60))
@@ -24,7 +25,7 @@ class InvoiceCleaner:
 
             # Получаем текст и кнопки из шаблона
             text, buttons = await MessageTemplates.get_raw_template(
-                'invoice_expired',  # Новый шаблон в Google Sheets
+                'invoice_expired',
                 {
                     'amount': invoice.amount,
                     'method': invoice.method
@@ -54,7 +55,7 @@ class InvoiceCleaner:
     async def send_warning(self, session, invoice: Payment, remaining: timedelta):
         try:
             text, buttons = await MessageTemplates.get_raw_template(
-                'invoice_warning',  # Новый шаблон в Google Sheets
+                'invoice_warning',  # Используем один шаблон для обоих предупреждений
                 {
                     'amount': invoice.amount,
                     'method': invoice.method,
@@ -78,11 +79,40 @@ class InvoiceCleaner:
 
             session.add(notification)
             session.commit()
-            logger.info(f"Warning notification sent for invoice {invoice.paymentID}")
+
+            remaining_minutes = int(remaining.total_seconds() / 60)
+            logger.info(f"Warning sent for invoice {invoice.paymentID}, {remaining_minutes} minutes remaining")
 
         except Exception as e:
             logger.error(f"Error sending warning for invoice {invoice.paymentID}: {e}")
             session.rollback()
+
+    async def cleanup_old_invoices(self):
+        """Очистка старых зависших инвойсов при старте"""
+        with Session() as session:
+            try:
+                # Инвойсы старше 3 часов автоматически помечаем как expired
+                three_hours_ago = datetime.utcnow() - timedelta(hours=3)
+                old_invoices = (
+                    session.query(Payment)
+                    .filter(
+                        Payment.status == "pending",
+                        Payment.createdAt < three_hours_ago
+                    )
+                    .all()
+                )
+
+                for invoice in old_invoices:
+                    invoice.status = "expired"
+                    logger.info(f"Old invoice {invoice.paymentID} marked as expired on startup")
+
+                if old_invoices:
+                    session.commit()
+                    logger.info(f"Cleaned up {len(old_invoices)} old pending invoices")
+
+            except Exception as e:
+                logger.error(f"Error cleaning up old invoices: {e}")
+                session.rollback()
 
     async def process_pending_invoices(self):
         """
@@ -90,25 +120,42 @@ class InvoiceCleaner:
         """
         with Session() as session:
             try:
-                # Получаем все ожидающие оплаты инвойсы старше 1 часа
-                one_hour_ago = datetime.utcnow() - timedelta(hours=1)
+                # Получаем pending платежи не старше 3 часов (с запасом)
+                three_hours_ago = datetime.utcnow() - timedelta(hours=3)
                 pending_invoices = (
                     session.query(Payment)
-                        .filter(
+                    .filter(
                         Payment.status == "pending",
-                        Payment.createdAt <= one_hour_ago
+                        Payment.createdAt >= three_hours_ago  # Защита от древних инвойсов
                     )
-                        .all()
+                    .all()
                 )
 
                 for invoice in pending_invoices:
                     age = datetime.utcnow() - invoice.createdAt
 
-                    # Если прошло больше 2 часов - помечаем как просроченный
-                    if age > timedelta(hours=2):
-                        await self.expire_invoice(session, invoice)
-                    # Если прошло больше 1 часа - отправляем предупреждение
-                    elif age > timedelta(hours=1):
+                    # Проверяем, сколько уведомлений уже отправлено для этого инвойса
+                    existing_notifications = (
+                        session.query(Notification)
+                        .filter(
+                            Notification.source == "invoice_cleaner",
+                            Notification.target_value == str(invoice.userID),
+                            Notification.text.like(f"%invoice_{invoice.paymentID}%")
+                        ).count()
+                    )
+
+                    # Через 2 часа - помечаем как просроченный
+                    if age >= timedelta(hours=2):
+                        if invoice.status == "pending":
+                            await self.expire_invoice(session, invoice)
+
+                    # За 10 минут до истечения (1:50) - второе предупреждение
+                    elif age >= timedelta(hours=1, minutes=50) and existing_notifications < 2:
+                        remaining = timedelta(hours=2) - age
+                        await self.send_warning(session, invoice, remaining)
+
+                    # За 30 минут до истечения (1:30) - первое предупреждение
+                    elif age >= timedelta(hours=1, minutes=30) and existing_notifications < 1:
                         remaining = timedelta(hours=2) - age
                         await self.send_warning(session, invoice, remaining)
 
@@ -121,6 +168,10 @@ class InvoiceCleaner:
         Запускает процесс проверки инвойсов
         """
         logger.info("Invoice cleaner started")
+
+        # Очищаем старые инвойсы при старте
+        await self.cleanup_old_invoices()
+
         self._running = True
 
         while self._running:
