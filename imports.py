@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Dict, Any, Optional
 from dataclasses import dataclass, field
 from sqlalchemy import and_
+from sqlalchemy.exc import IntegrityError
 from google_services import get_google_services
 from database import User, Project, Option, Purchase, Payment, Bonus, Transfer, ActiveBalance, PassiveBalance
 from init import Session
@@ -68,12 +69,11 @@ class DataUtils:
 
     @staticmethod
     def parse_float(value: Any) -> Optional[float]:
-        if not value:
+        if value == '' or value is None:
             return None
         try:
             result = float(value)
             return result
-            # if result >= 0 else None
         except (ValueError, TypeError):
             return None
 
@@ -116,33 +116,67 @@ class BaseImporter:
         return self.validate_required_fields(row, row_num)
 
     async def import_sheet(self, sheet) -> ImportStats:
-        """Основной метод импорта"""
+        """Основной метод импорта с обработкой ошибок"""
         rows = sheet.get_all_records()
         self.stats.total = len(rows)
 
         with Session() as session:
-            try:
-                for idx, row in enumerate(rows, start=2):
-                    try:
-                        if not self.validate_row(row, idx):
-                            self.stats.skipped += 1
+            for idx, row in enumerate(rows, start=2):
+                try:
+                    if not self.validate_row(row, idx):
+                        self.stats.skipped += 1
+                        continue
+
+                    if self.process_row(row, session):
+                        self.stats.updated += 1
+                    else:
+                        self.stats.added += 1
+
+                    # Коммитим каждые 50 записей для минимизации потерь при ошибке
+                    if (idx - 1) % 50 == 0:
+                        try:
+                            session.commit()
+                        except IntegrityError as e:
+                            session.rollback()
+                            self.stats.add_error(idx, f"Integrity error during batch commit: {str(e)}")
                             continue
 
-                        if self.process_row(row, session):
-                            self.stats.updated += 1
-                        else:
-                            self.stats.added += 1
+                except IntegrityError as e:
+                    session.rollback()  # Откатываем только текущую транзакцию
 
-                    except Exception as e:
+                    # Специальная обработка для разных типов ошибок целостности
+                    error_str = str(e)
+                    if 'UNIQUE constraint failed: users.telegramID' in error_str:
+                        self.stats.add_error(idx, f"Duplicate telegramID: {row.get('telegramID')}")
+                        self.stats.skipped += 1
+                        logger.warning(f"Row {idx}: Skipping duplicate telegramID {row.get('telegramID')}")
+                    elif 'UNIQUE constraint failed' in error_str:
+                        self.stats.add_error(idx, f"Duplicate record: {error_str}")
+                        self.stats.skipped += 1
+                    elif 'FOREIGN KEY constraint failed' in error_str:
+                        self.stats.add_error(idx, f"Foreign key error: {error_str}")
+                        self.stats.skipped += 1
+                    else:
                         self.stats.add_error(idx, str(e))
-                        logger.error(f"Row {idx} error: {e}", exc_info=True)
+                    continue
 
+                except Exception as e:
+                    session.rollback()
+                    self.stats.add_error(idx, str(e))
+                    logger.error(f"Row {idx} error: {e}", exc_info=True)
+                    continue
+
+            # Финальный коммит оставшихся записей
+            try:
                 session.commit()
-
+            except IntegrityError as e:
+                session.rollback()
+                logger.error(f"Final commit failed: {e}")
+                self.stats.add_error(0, f"Final commit error: {str(e)}")
             except Exception as e:
                 session.rollback()
-                logger.error(f"Import failed: {e}", exc_info=True)
-                raise
+                logger.error(f"Import failed during final commit: {e}", exc_info=True)
+                self.stats.add_error(0, f"Import error: {str(e)}")
 
         return self.stats
 
@@ -305,14 +339,20 @@ class UserImporter(BaseImporter):
     REQUIRED_FIELDS = ['userID', 'telegramID']
 
     def process_row(self, row: Dict[str, Any], session) -> bool:
-        user = session.query(User).filter_by(userID=row['userID']).first()
+        # ВАЖНО: Ищем пользователя по telegramID (он уникальный), а не по userID
+        user = session.query(User).filter_by(telegramID=row['telegramID']).first()
         is_update = bool(user)
 
         if not user:
             user = User()
+            # userID устанавливаем только при создании нового пользователя
+            user.userID = row['userID']
 
-        user.userID = row['userID']
-        user.telegramID = row['telegramID']
+        # telegramID не меняем если пользователь уже существует
+        if not is_update:
+            user.telegramID = row['telegramID']
+
+        # Обновляем все остальные поля
         user.createdAt = self.utils.parse_date(row.get('createdAt'))
         user.upline = self.utils.parse_int(row.get('upline'))
         user.lang = self.utils.clean_str(row.get('lang'))
@@ -410,19 +450,26 @@ class PaymentImporter(BaseImporter):
 
 
 class ActiveBalanceImporter(BaseImporter):
-    REQUIRED_FIELDS = ['paymentID', 'userID', 'firstname', 'amount', 'status', 'reason']
+    REQUIRED_FIELDS = ['paymentID', 'userID', 'firstname', 'status', 'reason']
 
     def validate_row(self, row: Dict[str, Any], row_num: int) -> bool:
-        if not super().validate_row(row, row_num):
-            return False
-
-        # Добавляем специальную проверку для amount
-        amount = self.utils.parse_float(row.get('amount'))
-        if amount is None:
-            self.stats.add_error(row_num, "Invalid amount format")
-            return False
-
-        return True
+        # Для manual_addition записей особая валидация
+        if 'manual_addition' in row.get('reason', ''):
+            # Проверяем все поля кроме amount (он может быть пустым или 0)
+            required_fields = ['paymentID', 'userID', 'firstname', 'status', 'reason']
+            for field in required_fields:
+                if not row.get(field):
+                    self.stats.add_error(row_num, f"Missing required field: {field}")
+                    return False
+            return True
+        else:
+            # Для остальных записей стандартная проверка включая amount
+            required_with_amount = self.REQUIRED_FIELDS + ['amount']
+            for field in required_with_amount:
+                if not row.get(field):
+                    self.stats.add_error(row_num, f"Missing required field: {field}")
+                    return False
+            return True
 
     def process_row(self, row: Dict[str, Any], session) -> bool:
         record = session.query(ActiveBalance).filter_by(paymentID=row['paymentID']).first()
@@ -431,20 +478,28 @@ class ActiveBalanceImporter(BaseImporter):
         if not record:
             record = ActiveBalance()
 
-        # Сначала проверяем amount
-        amount = self.utils.parse_float(row['amount'])
-        if amount is None:  # Дополнительная проверка
-            return False
+        # Особая обработка для manual_addition записей
+        if 'manual_addition' in row.get('reason', ''):
+            # Для manual_addition amount может быть пустым или 0
+            amount = self.utils.parse_float(row.get('amount', 0))
+            if amount is None:  # Если не удалось распарсить, ставим 0
+                amount = 0.0
+        else:
+            # Для остальных записей amount обязателен
+            amount = self.utils.parse_float(row['amount'])
+            if amount is None:
+                # Не должно произойти, так как мы проверили в validate_row
+                return False
 
         record.paymentID = row['paymentID']
         record.createdAt = self.utils.parse_date(row.get('createdAt'))
         record.userID = row['userID']
         record.firstname = row['firstname']
         record.surname = self.utils.clean_str(row.get('surname'))
-        record.amount = amount  # Используем уже проверенное значение
+        record.amount = amount  # Используем обработанное значение
         record.status = row['status']
         record.reason = row['reason']
-        record.link = self.utils.clean_str(row.get('link'))
+        record.link = self.utils.clean_str(row.get('link', ''))
         record.notes = self.utils.clean_str(row.get('notes'))
 
         if not is_update:
