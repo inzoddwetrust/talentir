@@ -865,7 +865,7 @@ class AdminCommands:
             await state.finish()
             logger.info(f"Сброшено состояние {current_state} для администратора")
 
-        command = message.text[1:].strip().lower()
+        command = message.text[1:].split()[0].lower()
         logger.info(f"Processing admin command: {command}")
 
         if command == "upall":
