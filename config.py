@@ -21,7 +21,7 @@ LEGACY_SHEET_ID = "1mbaRSbOs0Hc98iJ3YnZnyqL5yxeSuPJCef5PFjPHpFg"
 # Telegram
 API_TOKEN = os.getenv("TELEGRAM_API_TOKEN")
 ADMINS = list(map(int, os.getenv("ADMINS").split(",")))
-ADMIN_USER_IDS = [45, 1]  # Будет заполнено при инициализации
+ADMIN_USER_IDS = [45, 33, 1]  # Будет заполнено при инициализации
 ADMIN_LINKS = ['@jetup', '@iamshangtsung']  # Будет заполнено при инициализации
 
 # Кошельки и платежи
@@ -160,6 +160,3 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 # Email settings для Postmark
 EMAIL_FROM = os.getenv("EMAIL_FROM", "noreply@talentir.info")
 EMAIL_FROM_NAME = os.getenv("EMAIL_FROM_NAME", "Talentir")
-
-# Postmark API
-POSTMARK_API_TOKEN = os.getenv("POSTMARK_API_TOKEN", "")
