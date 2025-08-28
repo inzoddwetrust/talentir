@@ -198,118 +198,199 @@ class AdminCommands:
             await message.reply(error_msg)
 
     async def handle_testmail(self, message: types.Message):
-        """Обработчик команды &testmail для тестирования всех email провайдеров"""
+        """Команда &testmail - полное тестирование email системы"""
         try:
             reply = await message.reply("🔄 Тестируем email систему...")
 
-            from email_sender import email_manager
-
-            # Проверяем наличие провайдеров
-            if not email_manager.providers:
-                await reply.edit_text("❌ Нет настроенных email провайдеров!\n\n"
-                                      "Проверьте настройки:\n"
-                                      "• POSTMARK_API_TOKEN\n"
-                                      "• SMTP_HOST, SMTP_USER, SMTP_PASSWORD")
-                return
-
-            # Парсим аргументы команды
+            # Парсим аргумент если есть
             command_parts = message.text.split(maxsplit=1)
-            target_email = None
+            custom_email = None
 
             if len(command_parts) > 1:
-                # Email указан в команде
-                target_email = command_parts[1].strip()
-
-                # Простая валидация email
+                custom_email = command_parts[1].strip()
                 import re
-                email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-                if not re.match(email_pattern, target_email):
-                    await reply.edit_text(f"❌ Некорректный email адрес: {target_email}\n\n"
-                                          "Используйте формат: &testmail email@example.com")
+                if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', custom_email):
+                    await reply.edit_text(f"❌ Некорректный email: {custom_email}")
                     return
 
-                await reply.edit_text(f"📧 Отправляем тестовое письмо на: {target_email}...")
-            else:
-                # Email не указан, используем email админа из БД
-                with Session() as session:
-                    admin_user = session.query(User).filter_by(telegramID=message.from_user.id).first()
-                    if not admin_user or not admin_user.email:
-                        await reply.edit_text("❌ У вас не указан email в профиле!\n\n"
-                                              "Используйте:\n"
-                                              "• &testmail email@example.com - для отправки на указанный адрес\n"
-                                              "• Или установите свой email через /settings")
-                        return
-                    target_email = admin_user.email
-                    await reply.edit_text(f"📧 Отправляем тестовое письмо на ваш email: {target_email}...")
+            # 1. Проверяем конфигурацию
+            smtp_config = {
+                'host': getattr(config, 'SMTP_HOST', 'не установлен'),
+                'port': getattr(config, 'SMTP_PORT', 'не установлен'),
+                'user': getattr(config, 'SMTP_USER', 'не установлен'),
+                'password': '***' if hasattr(config, 'SMTP_PASSWORD') and config.SMTP_PASSWORD else 'не установлен'
+            }
 
-            # Показываем список провайдеров
-            provider_list = []
-            for i, provider in enumerate(email_manager.providers):
-                provider_list.append(f"{i + 1}. {provider.__class__.__name__}")
+            config_text = "\n".join([f"• {k}: {v}" for k, v in smtp_config.items()])
 
-            providers_text = "\n".join(provider_list)
-            await reply.edit_text(f"📧 Email: {target_email}\n\n"
-                                  f"📮 Доступные провайдеры:\n{providers_text}\n\n"
-                                  f"🔄 Начинаю тестирование...")
+            # Проверяем наличие всех настроек
+            if 'не установлен' in smtp_config.values() or smtp_config['password'] == 'не установлен':
+                await reply.edit_text(
+                    f"❌ SMTP не настроен!\n\n"
+                    f"📋 Текущая конфигурация:\n{config_text}\n\n"
+                    f"Проверьте .env файл:\n"
+                    f"• SMTP_HOST\n"
+                    f"• SMTP_PORT\n"
+                    f"• SMTP_USER\n"
+                    f"• SMTP_PASSWORD"
+                )
+                return
 
-            # Тестируем каждого провайдера
-            results = []
-            success_count = 0
+            await reply.edit_text(f"📋 Конфигурация SMTP:\n{config_text}\n\n"
+                                  f"🔗 Проверяем прямое подключение...")
 
-            for i, provider in enumerate(email_manager.providers):
-                provider_name = provider.__class__.__name__
+            # 2. Тестируем прямое SMTP подключение
+            import aiosmtplib
+
+            try:
+                smtp = aiosmtplib.SMTP(
+                    hostname=config.SMTP_HOST,
+                    port=config.SMTP_PORT,
+                    timeout=10
+                )
+
+                await smtp.connect()
+                await reply.edit_text(f"📋 Конфигурация SMTP:\n{config_text}\n\n"
+                                      f"✅ Подключение установлено\n\n"
+                                      f"🔐 Проверяем аутентификацию...")
+
+                # 3. Проверяем аутентификацию
                 try:
-                    # Отправляем тестовое письмо
-                    test_subject = f"Test from {config.PROJECT_NAME} - {provider_name}"
-                    test_body = f"""
-                    <h2>Test Email from {config.PROJECT_NAME}</h2>
-                    <p>This is a test email sent via <strong>{provider_name}</strong></p>
-                    <p>Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-                    <p>Admin: {message.from_user.first_name} (ID: {message.from_user.id})</p>
-                    <hr>
-                    <p>If you received this email, the {provider_name} provider is working correctly!</p>
-                    """
+                    await smtp.starttls()
+                except Exception as e:
+                    if "already using TLS" not in str(e):
+                        raise
 
-                    success = await provider.send_email(
-                        to_email=target_email,
-                        subject=test_subject,
-                        html_body=test_body
+                await smtp.login(config.SMTP_USER, config.SMTP_PASSWORD)
+                await smtp.quit()
+
+                await reply.edit_text(f"📋 Конфигурация SMTP:\n{config_text}\n\n"
+                                      f"✅ Подключение установлено\n"
+                                      f"✅ Аутентификация успешна\n\n"
+                                      f"📧 Проверяем EmailManager...")
+
+            except asyncio.TimeoutError:
+                await reply.edit_text(f"📋 Конфигурация SMTP:\n{config_text}\n\n"
+                                      f"❌ Таймаут подключения к {config.SMTP_HOST}:{config.SMTP_PORT}\n\n"
+                                      f"Возможные причины:\n"
+                                      f"• Неверный хост или порт\n"
+                                      f"• Блокировка фаерволом\n"
+                                      f"• SMTP сервер не запущен")
+                return
+
+            except aiosmtplib.SMTPAuthenticationError as e:
+                await reply.edit_text(f"📋 Конфигурация SMTP:\n{config_text}\n\n"
+                                      f"✅ Подключение установлено\n"
+                                      f"❌ Ошибка аутентификации:\n{str(e)}\n\n"
+                                      f"Проверьте:\n"
+                                      f"• Правильность логина/пароля\n"
+                                      f"• Существует ли пользователь {config.SMTP_USER}")
+                return
+
+            except Exception as e:
+                await reply.edit_text(f"📋 Конфигурация SMTP:\n{config_text}\n\n"
+                                      f"❌ Ошибка подключения: {str(e)}")
+                return
+
+            # 4. Тестируем через EmailManager
+            from email_sender import email_manager
+
+            if not email_manager.providers:
+                await reply.edit_text(f"📋 Конфигурация SMTP:\n{config_text}\n\n"
+                                      f"✅ Прямое подключение работает\n\n"
+                                      f"❌ EmailManager не инициализирован!\n"
+                                      f"Перезапустите бота")
+                return
+
+            # Проверяем статус провайдеров
+            providers_status = await email_manager.get_providers_status()
+
+            status_text = []
+            for provider_name, is_working in providers_status.items():
+                status_text.append(f"{'✅' if is_working else '❌'} {provider_name}")
+
+            status_report = "\n".join(status_text)
+
+            # 5. Определяем target email и отправляем тестовое письмо
+            with Session() as session:
+                if custom_email:
+                    target_email = custom_email
+                    firstname = "Test User"
+                else:
+                    user = session.query(User).filter_by(telegramID=message.from_user.id).first()
+                    if not user or not user.email:
+                        await reply.edit_text(f"📋 Конфигурация SMTP:\n{config_text}\n\n"
+                                              f"✅ SMTP подключение работает\n"
+                                              f"📊 Статус EmailManager:\n{status_report}\n\n"
+                                              f"❌ Не могу отправить тест-письмо!\n"
+                                              f"У вас не указан email\n\n"
+                                              f"Используйте: &testmail email@example.com")
+                        return
+                    target_email = user.email
+                    firstname = user.firstname
+
+                await reply.edit_text(f"📋 Конфигурация SMTP:\n{config_text}\n\n"
+                                      f"✅ SMTP подключение работает\n"
+                                      f"📊 Статус EmailManager:\n{status_report}\n\n"
+                                      f"📤 Отправляем тест-письмо на {target_email}...")
+
+                # Отправляем тестовое письмо
+                test_html = f"""
+                <html>
+                <body>
+                    <h2>🎉 Тест email системы Talentir</h2>
+                    <p>Привет, <strong>{firstname}</strong>!</p>
+                    <p>Если вы видите это письмо, значит email система работает корректно.</p>
+
+                    <hr>
+
+                    <h3>📊 Детали теста:</h3>
+                    <ul>
+                        <li><strong>Сервер:</strong> {config.SMTP_HOST}:{config.SMTP_PORT}</li>
+                        <li><strong>Пользователь:</strong> {config.SMTP_USER}</li>
+                        <li><strong>Время:</strong> {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC</li>
+                        <li><strong>Отправлено через:</strong> EmailManager</li>
+                    </ul>
+
+                    <hr>
+                    <p><small>Это автоматическое письмо от Talentir Bot</small></p>
+                </body>
+                </html>
+                """
+
+                success = await email_manager.send_notification_email(
+                    to=target_email,
+                    subject="✅ Тест Email Системы Talentir",
+                    body=test_html
+                )
+
+                if success:
+                    await reply.edit_text(
+                        f"🎉 **Email система полностью работает!**\n\n"
+                        f"📋 Конфигурация SMTP:\n{config_text}\n\n"
+                        f"✅ Прямое подключение: OK\n"
+                        f"✅ Аутентификация: OK\n"
+                        f"✅ EmailManager: OK\n"
+                        f"✅ Отправка писем: OK\n\n"
+                        f"📧 Тест-письмо отправлено на {target_email}\n"
+                        f"📬 Проверьте почту (включая папку спам)!"
+                    )
+                else:
+                    await reply.edit_text(
+                        f"⚠️ **Частичная работоспособность**\n\n"
+                        f"📋 Конфигурация SMTP:\n{config_text}\n\n"
+                        f"✅ Прямое подключение: OK\n"
+                        f"✅ Аутентификация: OK\n"
+                        f"❌ EmailManager: Ошибка отправки\n\n"
+                        f"Возможные причины:\n"
+                        f"• Проблема с форматированием письма\n"
+                        f"• Ограничения на отправку\n"
+                        f"• Проверьте логи: journalctl -u talentir-bot -f"
                     )
 
-                    if success:
-                        results.append(f"✅ {provider_name}: Успешно отправлено")
-                        success_count += 1
-                    else:
-                        results.append(f"❌ {provider_name}: Ошибка отправки")
-
-                except Exception as e:
-                    results.append(f"❌ {provider_name}: {str(e)[:50]}")
-                    logger.error(f"Error testing {provider_name}: {e}", exc_info=True)
-
-            # Формируем итоговый отчет
-            results_text = "\n".join(results)
-
-            if success_count > 0:
-                status_emoji = "✅" if success_count == len(email_manager.providers) else "⚠️"
-                await reply.edit_text(
-                    f"{status_emoji} Тестирование завершено!\n\n"
-                    f"📧 Email: {target_email}\n"
-                    f"📊 Успешно: {success_count}/{len(email_manager.providers)}\n\n"
-                    f"Результаты:\n{results_text}\n\n"
-                    f"📬 Проверьте почтовый ящик (включая папку спам)"
-                )
-            else:
-                await reply.edit_text(
-                    f"❌ Все провайдеры не смогли отправить письмо!\n\n"
-                    f"📧 Email: {target_email}\n\n"
-                    f"Результаты:\n{results_text}\n\n"
-                    f"Проверьте настройки email провайдеров"
-                )
-
         except Exception as e:
-            error_msg = f"❌ Ошибка при тестировании email: {str(e)}"
-            logger.error(error_msg, exc_info=True)
-            await message.reply(error_msg)
+            await message.reply(f"❌ Критическая ошибка: {str(e)}")
+            logger.error(f"Error in testmail command: {e}", exc_info=True)
 
     async def handle_addtokens(self, message: types.Message):
         """Handler for &addtokens command to manually add shares to user"""
