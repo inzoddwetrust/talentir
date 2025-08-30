@@ -39,7 +39,7 @@ class SMTPProvider:
             if text_body:
                 # If both HTML and text - create multipart
                 message = MIMEMultipart('alternative')
-                message['From'] = f"{config.EMAIL_FROM_NAME} <{config.EMAIL_FROM}>"
+                message['From'] = f"JetUp <{config.SMTP_USER}>"
                 message['To'] = to
                 message['Subject'] = subject
 
