@@ -74,7 +74,6 @@ STRATEGY_COEFFICIENTS = {
 }
 
 # Transfer Bonus
-
 TRANSFER_BONUS = 2
 
 # Ошибки
@@ -107,7 +106,7 @@ SOCIAL_LINKS = {
 }
 
 # URL для FAQ веб-приложения
-FAQ_URL = "91.227.18.8/books/user-documents/page/option-alienation-agreement"
+FAQ_URL = "https://jetup.info/books/user-documents/page/option-alienation-agreement"
 
 # Список обязательных каналов/групп для подписки
 REQUIRED_CHANNELS = [
@@ -138,7 +137,7 @@ REQUIRED_CHANNELS = [
 ]
 
 # BookStack API
-BOOKSTACK_URL = os.getenv("BOOKSTACK_URL", "https:/jetup.info")
+BOOKSTACK_URL = os.getenv("BOOKSTACK_URL", "https://jetup.info")
 BOOKSTACK_TOKEN_ID = os.getenv("BOOKSTACK_TOKEN_ID")
 BOOKSTACK_TOKEN_SECRET = os.getenv("BOOKSTACK_TOKEN_SECRET")
 
@@ -152,11 +151,8 @@ PROJECT_DOCUMENTS = {
     "faq": "project-faq"
 }
 
-SMTP_HOST = os.getenv("SMTP_HOST", "mail.talentir.info")
+# SMTP настройки
+SMTP_HOST = os.getenv("SMTP_HOST", "mail.jetup.info")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER", "noreply@talentir.info")
+SMTP_USER = os.getenv("SMTP_USER", "noreply@jetup.info")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
-
-# Email settings для Postmark
-EMAIL_FROM = os.getenv("EMAIL_FROM", "noreply@talentir.info")
-EMAIL_FROM_NAME = os.getenv("EMAIL_FROM_NAME", "Talentir")
