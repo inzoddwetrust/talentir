@@ -52,7 +52,7 @@ class SMTPProvider:
             else:
                 # HTML only version
                 message = MIMEText(html_body, 'html', 'utf-8')
-                message['From'] = f"{config.EMAIL_FROM_NAME} <{config.EMAIL_FROM}>"
+                message['From'] = f"JetUp <{config.SMTP_USER}>"
                 message['To'] = to
                 message['Subject'] = subject
 
