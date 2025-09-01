@@ -188,19 +188,23 @@ class MailgunProvider:
             bool: True if connection successful
         """
         try:
+            # ОТЛАДКА: проверяем ключ
             logger.info(f"Testing Mailgun connection to {self.base_url}")
+            logger.info(f"API Key first 10 chars: {self.api_key[:10]}...")
+            logger.info(f"API Key last 10 chars: ...{self.api_key[-10:]}")
+            logger.info(f"API Key length: {len(self.api_key)}")
+            logger.info(f"Domain: {self.domain}")
 
             # Try to get domain info
             async with aiohttp.ClientSession() as session:
                 async with session.get(
-                        f"{self.base_url}/domains/{self.domain}",
-                        auth=aiohttp.BasicAuth("api", self.api_key),
-                        timeout=aiohttp.ClientTimeout(total=10)
+                    f"{self.base_url}/domains/{self.domain}",
+                    auth=aiohttp.BasicAuth("api", self.api_key),
+                    timeout=aiohttp.ClientTimeout(total=10)
                 ) as response:
                     if response.status == 200:
                         domain_info = await response.json()
-                        logger.info(
-                            f"Mailgun connection test successful. Domain state: {domain_info.get('domain', {}).get('state', 'unknown')}")
+                        logger.info(f"Mailgun connection test successful. Domain state: {domain_info.get('domain', {}).get('state', 'unknown')}")
                         return True
                     else:
                         response_text = await response.text()
