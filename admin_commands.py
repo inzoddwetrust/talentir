@@ -367,8 +367,11 @@ class AdminCommands:
 
             if success:
                 fallback_info = ""
-                if len(provider_order) > 1:
-                    fallback_info = f"\n💡 Fallback провайдер: {provider_order[1].upper()}"
+                # Показываем fallback только если не было форсирования
+                if not forced_provider:
+                    provider_order = email_manager._select_provider_for_email(target_email)
+                    if len(provider_order) > 1:
+                        fallback_info = f"\n💡 Fallback провайдер: {provider_order[1].upper()}"
 
                 await reply.edit_text(
                     f"🎉 **Email система работает!**\n\n"
