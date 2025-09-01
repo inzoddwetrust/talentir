@@ -198,16 +198,20 @@ class MailgunProvider:
             # Try to get domain info
             async with aiohttp.ClientSession() as session:
                 async with session.get(
-                    f"{self.base_url}/domains/{self.domain}",
-                    auth=aiohttp.BasicAuth("api", self.api_key),
-                    timeout=aiohttp.ClientTimeout(total=10)
+                        f"{self.base_url}/domains/{self.domain}",
+                        headers={"Authorization": self.auth_header},
+                        timeout=aiohttp.ClientTimeout(total=10)
                 ) as response:
+                    response_text = await response.text()
+                    logger.info(f"Response status: {response.status}")
+                    logger.info(f"Response text: {response_text}")
+
                     if response.status == 200:
                         domain_info = await response.json()
-                        logger.info(f"Mailgun connection test successful. Domain state: {domain_info.get('domain', {}).get('state', 'unknown')}")
+                        logger.info(
+                            f"Mailgun connection test successful. Domain state: {domain_info.get('domain', {}).get('state', 'unknown')}")
                         return True
                     else:
-                        response_text = await response.text()
                         logger.error(f"Mailgun connection test failed: {response.status} - {response_text}")
                         return False
 
