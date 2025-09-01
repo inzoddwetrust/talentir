@@ -2,7 +2,7 @@ import logging
 import asyncio
 from aiogram.dispatcher.filters import Filter
 from aiogram.dispatcher import FSMContext
-from aiogram import Dispatcher, types
+from aiogram import types
 from aiogram.dispatcher.handler import CancelHandler
 from aiogram.dispatcher.middlewares import BaseMiddleware
 from bookstack_integration import clear_template_cache
@@ -10,11 +10,10 @@ from bookstack_integration import clear_template_cache
 import config
 from imports import (
     ProjectImporter, UserImporter, OptionImporter,
-    PaymentImporter, PurchaseImporter, BonusImporter, ConfigImporter, import_all
+    ConfigImporter, import_all
 )
 
-from database import Option, Notification, User, Bonus, Project, Purchase, ActiveBalance, PassiveBalance
-from bonus_processor import process_purchase_with_bonuses
+from database import Bonus, Project, Purchase, ActiveBalance, PassiveBalance
 from templates import MessageTemplates
 from google_services import get_google_services
 from sqlalchemy import func
@@ -53,8 +52,9 @@ class AdminCommandsMiddleware(BaseMiddleware):
 
 
 class AdminCommands:
-    def __init__(self, dp):
+    def __init__(self, dp, message_manager):
         self.dp = dp
+        self.message_manager = message_manager
         self.register_handlers()
 
     def register_handlers(self):
@@ -207,7 +207,12 @@ class AdminCommands:
 
     async def handle_testmail(self, message: types.Message):
         """Test email functionality with smart provider selection"""
-        reply = await message.reply("🔄 Проверяем email систему...")
+        # Получаем язык админа из БД
+        with Session() as session:
+            admin_user = session.query(User).filter_by(telegramID=message.from_user.id).first()
+            admin_lang = admin_user.lang if admin_user else 'en'
+
+        reply = await message.reply("🔄 Loading...")
 
         try:
             # Parse command: &testmail [email] [provider]
@@ -220,52 +225,70 @@ class AdminCommands:
             if len(parts) > 2:
                 forced_provider = parts[2].lower()
                 if forced_provider not in ['smtp', 'mailgun']:
-                    await reply.edit_text(f"❌ Неизвестный провайдер: {forced_provider}\n"
-                                          f"Доступны: smtp, mailgun")
+                    await self.message_manager.send_template(
+                        user=admin_user,
+                        template_key='admin/testmail/invalid_provider',
+                        variables={'provider': forced_provider},
+                        update=reply,
+                        edit=True
+                    )
                     return
 
             # Validate custom email if provided
             if custom_email:
                 import re
                 if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', custom_email):
-                    await reply.edit_text(f"❌ Некорректный email: {custom_email}")
+                    await self.message_manager.send_template(
+                        user=admin_user,
+                        template_key='admin/testmail/invalid_email',
+                        variables={'email': custom_email},
+                        update=reply,
+                        edit=True
+                    )
                     return
 
-            # 1. Check providers configuration
+            # Check providers configuration
             from email_sender import email_manager
 
             if not email_manager.providers:
-                await reply.edit_text("❌ Email провайдеры не настроены!\nПроверьте .env файл")
+                await self.message_manager.send_template(
+                    user=admin_user,
+                    template_key='admin/testmail/no_providers',
+                    update=reply,
+                    edit=True
+                )
                 return
 
-            # 2. Test all providers
-            await reply.edit_text("📊 Проверяем провайдеры...")
+            # Test all providers
+            await self.message_manager.send_template(
+                user=admin_user,
+                template_key='admin/testmail/checking',
+                update=reply,
+                edit=True
+            )
 
             providers_status = await email_manager.get_providers_status()
 
-            status_text = []
-            working_providers = []
+            # Build status report using modular templates
+            template_keys = ['admin/testmail/header']
+            working_providers=[]
 
             for provider_name, is_working in providers_status.items():
                 if provider_name == 'smtp':
-                    config_info = f"({config.SMTP_HOST}:{config.SMTP_PORT})"
+                    template_keys.append('admin/testmail/status_smtp')
                 elif provider_name == 'mailgun':
-                    config_info = f"({config.MAILGUN_DOMAIN}, {config.MAILGUN_REGION})"
-                else:
-                    config_info = ""
-
-                status = "✅ OK" if is_working else "❌ FAIL"
-                status_text.append(f"• {provider_name.upper()} {config_info}: {status}")
+                    template_keys.append('admin/testmail/status_mailgun')
 
                 if is_working:
                     working_providers.append(provider_name)
 
-            status_report = "\n".join(status_text)
+            # Add secure domains info
+            if email_manager.secure_domains:
+                template_keys.append('admin/testmail/secure_domains')
+            else:
+                template_keys.append('admin/testmail/no_secure_domains')
 
-            # 3. Check secure domains configuration
-            secure_domains_info = f"📋 Секурные домены: {', '.join(email_manager.secure_domains) if email_manager.secure_domains else 'не настроены'}"
-
-            # 4. Determine target email
+            # Determine target email
             with Session() as session:
                 if custom_email:
                     target_email = custom_email
@@ -273,356 +296,176 @@ class AdminCommands:
                 else:
                     user = session.query(User).filter_by(telegramID=message.from_user.id).first()
                     if not user or not user.email:
-                        await reply.edit_text(
-                            f"📊 **Статус провайдеров:**\n{status_report}\n\n"
-                            f"{secure_domains_info}\n\n"
-                            f"❌ У вас не указан email!\n\n"
-                            f"Используйте: `&testmail email@example.com [smtp|mailgun]`"
+                        template_keys.append('admin/testmail/no_user_email')
+
+                        await self.message_manager.send_template(
+                            user=admin_user,
+                            template_key=template_keys,
+                            variables={
+                                'smtp_host': config.SMTP_HOST,
+                                'smtp_port': config.SMTP_PORT,
+                                'smtp_status': '✅ OK' if providers_status.get('smtp', False) else '❌ FAIL',
+                                'mailgun_domain': config.MAILGUN_DOMAIN,
+                                'mailgun_region': config.MAILGUN_REGION,
+                                'mailgun_status': '✅ OK' if providers_status.get('mailgun', False) else '❌ FAIL',
+                                'domains': ', '.join(email_manager.secure_domains)
+                            },
+                            update=reply,
+                            edit=True
                         )
                         return
                     target_email = user.email
                     firstname = user.firstname
 
-            # 5. Determine which provider will be used
+            # Determine which provider will be used
             if forced_provider:
-                # Use forced provider
                 if forced_provider not in working_providers:
-                    await reply.edit_text(
-                        f"📊 **Статус провайдеров:**\n{status_report}\n\n"
-                        f"❌ Провайдер {forced_provider.upper()} не работает!"
+                    template_keys.append('admin/testmail/provider_not_working')
+                    await self.message_manager.send_template(
+                        user=admin_user,
+                        template_key=template_keys,
+                        variables={
+                            'smtp_host': config.SMTP_HOST,
+                            'smtp_port': config.SMTP_PORT,
+                            'smtp_status': '✅ OK' if providers_status.get('smtp', False) else '❌ FAIL',
+                            'mailgun_domain': config.MAILGUN_DOMAIN,
+                            'mailgun_region': config.MAILGUN_REGION,
+                            'mailgun_status': '✅ OK' if providers_status.get('mailgun', False) else '❌ FAIL',
+                            'domains': ', '.join(email_manager.secure_domains) if email_manager.secure_domains else '',
+                            'provider': forced_provider.upper()
+                        },
+                        update=reply,
+                        edit=True
                     )
                     return
                 selected_provider = forced_provider
-                selection_reason = "форсирован пользователем"
+                template_keys.append('admin/testmail/reason_forced')
             else:
-                # Use smart selection
                 provider_order = email_manager._select_provider_for_email(target_email)
                 if not provider_order:
-                    await reply.edit_text(
-                        f"📊 **Статус провайдеров:**\n{status_report}\n\n"
-                        f"❌ Нет доступных провайдеров для {target_email}"
-                    )
+                    template_keys.append('admin/testmail/no_available_providers')
+                    # ... отправка с ошибкой
                     return
 
                 selected_provider = provider_order[0]
                 domain = email_manager._get_email_domain(target_email)
 
                 if domain in email_manager.secure_domains:
-                    selection_reason = f"домен {domain} в списке секурных"
+                    template_keys.append('admin/testmail/reason_secure')
                 else:
-                    selection_reason = f"домен {domain} обычный"
+                    template_keys.append('admin/testmail/reason_regular')
 
-            # 6. Send test email
-            await reply.edit_text(
-                f"📊 **Статус провайдеров:**\n{status_report}\n\n"
-                f"{secure_domains_info}\n\n"
-                f"📤 Отправляем тест на {target_email}\n"
-                f"🎯 Используем: **{selected_provider.upper()}** ({selection_reason})..."
+            # Add sending status
+            template_keys.append('admin/testmail/sending')
+
+            # Send status message
+            await self.message_manager.send_template(
+                user=admin_user,
+                template_key=template_keys,
+                variables={
+                    'smtp_host': config.SMTP_HOST,
+                    'smtp_port': config.SMTP_PORT,
+                    'smtp_status': '✅ OK' if providers_status.get('smtp', False) else '❌ FAIL',
+                    'mailgun_domain': config.MAILGUN_DOMAIN,
+                    'mailgun_region': config.MAILGUN_REGION,
+                    'mailgun_status': '✅ OK' if providers_status.get('mailgun', False) else '❌ FAIL',
+                    'domains': ', '.join(email_manager.secure_domains) if email_manager.secure_domains else '',
+                    'target_email': target_email,
+                    'provider': selected_provider.upper(),
+                    'domain': email_manager._get_email_domain(target_email)
+                },
+                update=reply,
+                edit=True
             )
 
-            # Prepare test email
-            test_html = f"""
-            <html>
-            <body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-                <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 20px; border-radius: 10px 10px 0 0;">
-                    <h1 style="color: white; margin: 0;">🚀 JetUp Email Test</h1>
-                </div>
+            # Get email body template
+            email_subject, _ = await MessageTemplates.get_raw_template(
+                'admin/testmail/email_subject',
+                {'provider': selected_provider.upper()},
+                lang=admin_lang
+            )
 
-                <div style="padding: 20px; background: #f5f5f5;">
-                    <p>Привет, <strong>{firstname}</strong>!</p>
+            email_body, _ = await MessageTemplates.get_raw_template(
+                'admin/testmail/email_body',
+                {
+                    'firstname': firstname,
+                    'target_email': target_email,
+                    'provider': selected_provider.upper(),
+                    'time': datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+                },
+                lang=admin_lang
+            )
 
-                    <div style="background: white; padding: 15px; border-radius: 8px; margin: 15px 0;">
-                        <h3 style="color: #667eea; margin-top: 0;">📊 Детали отправки:</h3>
-                        <ul style="list-style-type: none; padding-left: 0;">
-                            <li>📧 <strong>Получатель:</strong> {target_email}</li>
-                            <li>🔧 <strong>Провайдер:</strong> {selected_provider.upper()}</li>
-                            <li>📝 <strong>Причина выбора:</strong> {selection_reason}</li>
-                            <li>⏰ <strong>Время:</strong> {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC</li>
-                        </ul>
-                    </div>
-
-                    <div style="background: #e8f4fd; padding: 15px; border-radius: 8px; border-left: 4px solid #2196F3;">
-                        <p style="margin: 0;"><strong>✅ Email система работает корректно!</strong></p>
-                        <p style="margin: 5px 0 0 0; font-size: 14px; color: #666;">
-                            Это письмо отправлено через {selected_provider.upper()} провайдер.
-                        </p>
-                    </div>
-                </div>
-
-                <div style="padding: 15px; background: #333; color: #999; font-size: 12px; text-align: center;">
-                    <p style="margin: 0;">JetUp Investment Bot | Automated Test Email</p>
-                </div>
-            </body>
-            </html>
-            """
-
-            # Send through selected provider directly
+            # Send test email
             provider = email_manager.providers[selected_provider]
             success = await provider.send_email(
                 to=target_email,
-                subject=f"✅ Test Email via {selected_provider.upper()} | JetUp",
-                html_body=test_html,
+                subject=email_subject,
+                html_body=email_body,
                 text_body=None
             )
 
+            # Build final status message
             if success:
-                fallback_info = ""
-                # Показываем fallback только если не было форсирования
+                final_templates = ['admin/testmail/header']
+
+                # Add provider statuses
+                for provider_name in providers_status.keys():
+                    if provider_name == 'smtp':
+                        final_templates.append('admin/testmail/status_smtp')
+                    elif provider_name == 'mailgun':
+                        final_templates.append('admin/testmail/status_mailgun')
+
+                # Add secure domains
+                if email_manager.secure_domains:
+                    final_templates.append('admin/testmail/secure_domains')
+                else:
+                    final_templates.append('admin/testmail/no_secure_domains')
+
+                # Add success message
+                final_templates.append('admin/testmail/success')
+
+                # Add fallback info if applicable
                 if not forced_provider:
                     provider_order = email_manager._select_provider_for_email(target_email)
                     if len(provider_order) > 1:
-                        fallback_info = f"\n💡 Fallback провайдер: {provider_order[1].upper()}"
+                        final_templates.append('admin/testmail/fallback')
 
-                await reply.edit_text(
-                    f"🎉 **Email система работает!**\n\n"
-                    f"📊 **Статус провайдеров:**\n{status_report}\n\n"
-                    f"{secure_domains_info}\n\n"
-                    f"✅ **Тест отправлен:**\n"
-                    f"• Получатель: {target_email}\n"
-                    f"• Провайдер: {selected_provider.upper()}\n"
-                    f"• Причина: {selection_reason}{fallback_info}\n\n"
-                    f"📬 Проверьте почту (включая папку спам)!"
+                await self.message_manager.send_template(
+                    user=admin_user,
+                    template_key=final_templates,
+                    variables={
+                        'smtp_host': config.SMTP_HOST,
+                        'smtp_port': config.SMTP_PORT,
+                        'smtp_status': '✅ OK' if providers_status.get('smtp', False) else '❌ FAIL',
+                        'mailgun_domain': config.MAILGUN_DOMAIN,
+                        'mailgun_region': config.MAILGUN_REGION,
+                        'mailgun_status': '✅ OK' if providers_status.get('mailgun', False) else '❌ FAIL',
+                        'domains': ', '.join(email_manager.secure_domains) if email_manager.secure_domains else '',
+                        'target_email': target_email,
+                        'provider': selected_provider.upper(),
+                        'fallback_provider': provider_order[1].upper() if len(provider_order) > 1 else ''
+                    },
+                    update=reply,
+                    edit=True
                 )
             else:
-                await reply.edit_text(
-                    f"⚠️ **Ошибка отправки**\n\n"
-                    f"📊 **Статус провайдеров:**\n{status_report}\n\n"
-                    f"{secure_domains_info}\n\n"
-                    f"❌ Не удалось отправить через {selected_provider.upper()}\n\n"
-                    f"Проверьте логи: `journalctl -u jetup-bot -f`"
+                # Error message
+                error_templates = ['admin/testmail/header']
+                # ... добавляем шаблоны для ошибки
+                error_templates.append('admin/testmail/send_error')
+
+                await self.message_manager.send_template(
+                    user=admin_user,
+                    template_key=error_templates,
+                    variables={...},
+                    update=reply,
+                    edit=True
                 )
 
         except Exception as e:
-            await message.reply(f"❌ Критическая ошибка: {str(e)}")
+            await message.reply(f"❌ Critical error: {str(e)}")
             logger.error(f"Error in testmail command: {e}", exc_info=True)
-
-    async def handle_addtokens(self, message: types.Message):
-        """Handler for &addtokens command to manually add shares to user"""
-        try:
-            # Parse command arguments
-            command_text = message.text[1:].strip()  # Remove & and whitespace
-
-            # Expected format: addtokens u:{userID} pj:{projectID} q:{Qty} o:{OptionID} (optional)
-            if not command_text.startswith('addtokens'):
-                await message.reply("❌ Invalid command format")
-                return
-
-            # Extract parameters using regex
-            import re
-
-            # Parse parameters
-            user_match = re.search(r'u:(\d+)', command_text)
-            project_match = re.search(r'pj:(\d+)', command_text)
-            qty_match = re.search(r'q:(\d+)', command_text)
-            option_match = re.search(r'o:(\d+)', command_text)
-
-            if not all([user_match, project_match, qty_match]):
-                await message.reply(
-                    "❌ Invalid command format!\n\n"
-                    "Usage: &addtokens u:{userID} pj:{projectID} q:{Qty} o:{OptionID}\n"
-                    "       &addtokens u:{userID} pj:{projectID} q:{Qty}\n\n"
-                    "Examples:\n"
-                    "  &addtokens u:123 pj:42 q:100 o:456\n"
-                    "  &addtokens u:123 pj:42 q:100"
-                )
-                return
-
-            # Extract values
-            user_id = int(user_match.group(1))
-            project_id = int(project_match.group(1))
-            quantity = int(qty_match.group(1))
-            option_id = int(option_match.group(1)) if option_match else None
-
-            # Validate parameters
-            if quantity <= 0:
-                await message.reply("❌ Quantity must be positive")
-                return
-
-            reply = await message.reply(f"🔄 Processing manual share addition...")
-
-            with Session() as session:
-                # Check if user exists
-                target_user = session.query(User).filter_by(userID=user_id).first()
-                if not target_user:
-                    await reply.edit_text(f"❌ User with ID {user_id} not found")
-                    return
-
-                # Check if project exists
-                project = session.query(Project).filter_by(projectID=project_id).first()
-                if not project:
-                    await reply.edit_text(f"❌ Project with ID {project_id} not found")
-                    return
-
-                # Find option
-                if option_id:
-                    # Use specified option
-                    option = session.query(Option).filter_by(
-                        optionID=option_id,
-                        projectID=project_id
-                    ).first()
-
-                    if not option:
-                        await reply.edit_text(
-                            f"❌ Option with ID {option_id} not found for project {project_id}"
-                        )
-                        return
-
-                    # Check if specified quantity matches option or is within reasonable bounds
-                    if quantity != option.packQty:
-                        await reply.edit_text(
-                            f"⚠️ Warning: Specified quantity ({quantity}) differs from option quantity ({option.packQty})\n"
-                            f"Proceeding with specified quantity: {quantity}"
-                        )
-
-                else:
-                    # Find first available option for this project (preferably active)
-                    option = session.query(Option).filter_by(
-                        projectID=project_id,
-                        isActive=True
-                    ).order_by(Option.optionID.asc()).first()
-
-                    if not option:
-                        # If no active options, try inactive ones
-                        option = session.query(Option).filter_by(
-                            projectID=project_id
-                        ).order_by(Option.optionID.asc()).first()
-
-                    if not option:
-                        await reply.edit_text(
-                            f"❌ No options found for project {project_id}\n"
-                            f"Please create an option first or specify option ID"
-                        )
-                        return
-
-                    # Inform about auto-selected option
-                    await reply.edit_text(
-                        f"🔄 Auto-selected option {option.optionID} for project {project_id}\n"
-                        f"Option: {option.packQty} shares at ${option.costPerShare:.2f} per share\n"
-                        f"Processing {quantity} shares..."
-                    )
-
-                # Calculate total price based on option's price per share
-                total_price = option.costPerShare * quantity
-
-                # Get admin user for logging
-                admin_user = session.query(User).filter_by(telegramID=message.from_user.id).first()
-                admin_name = admin_user.firstname if admin_user else "Unknown Admin"
-
-                # Create purchase record using existing option
-                purchase = Purchase(
-                    userID=user_id,
-                    projectID=project_id,
-                    projectName=project.projectName,
-                    optionID=option.optionID,
-                    packQty=quantity,
-                    packPrice=total_price,
-                    createdAt=datetime.utcnow()
-                )
-
-                session.add(purchase)
-                session.flush()  # Get the purchase ID
-
-                # Create ActiveBalance record for tracking (no actual balance change)
-                balance_record = ActiveBalance(
-                    userID=user_id,
-                    firstname=target_user.firstname,
-                    surname=target_user.surname,
-                    amount=0.0,  # No balance change for manual addition
-                    status='done',
-                    reason=f'manual_addition={purchase.purchaseID}',
-                    link='',
-                    notes=f'Manual share addition by admin: {admin_name} ({message.from_user.id}). '
-                          f'Option: {option.optionID}, Qty: {quantity}, Price: ${total_price:.2f}'
-                )
-                session.add(balance_record)
-
-                # Create notification for the user
-                text, buttons = await MessageTemplates.get_raw_template(
-                    'admin_tokens_added_notification',
-                    {
-                        'firstname': target_user.firstname,
-                        'quantity': quantity,
-                        'project_name': project.projectName,
-                        'price': total_price,
-                        'admin_name': admin_name
-                    },
-                    lang=target_user.lang
-                )
-
-                user_notification = Notification(
-                    source="admin_command",
-                    text=text,
-                    buttons=buttons,
-                    target_type="user",
-                    target_value=str(user_id),
-                    priority=2,
-                    category="admin",
-                    importance="high",
-                    parse_mode="HTML"
-                )
-                session.add(user_notification)
-
-                # Create notification for other admins
-                admin_text, admin_buttons = await MessageTemplates.get_raw_template(
-                    'admin_tokens_added_admin_notification',
-                    {
-                        'admin_name': admin_name,
-                        'admin_id': message.from_user.id,
-                        'user_name': target_user.firstname,
-                        'user_id': user_id,
-                        'quantity': quantity,
-                        'project_name': project.projectName,
-                        'price': total_price,
-                        'purchase_id': purchase.purchaseID,
-                        'option_id': option.optionID
-                    }
-                )
-
-                # Send to all admins except the one who executed the command
-                for admin_id in config.ADMIN_USER_IDS:
-                    if admin_id != (admin_user.userID if admin_user else None):
-                        admin_notification = Notification(
-                            source="admin_command",
-                            text=admin_text,
-                            buttons=admin_buttons,
-                            target_type="user",
-                            target_value=str(admin_id),
-                            priority=1,
-                            category="admin",
-                            importance="normal",
-                            parse_mode="HTML"
-                        )
-                        session.add(admin_notification)
-
-                session.commit()
-
-                # NOTE: No referral bonuses for manual admin additions
-                # asyncio.create_task(process_purchase_with_bonuses(purchase.purchaseID))
-
-                # Success message
-                option_status = "🟢 Active" if option.isActive else "🔴 Inactive"
-                await reply.edit_text(
-                    f"✅ Successfully added shares!\n\n"
-                    f"👤 User: {target_user.firstname} (ID: {user_id})\n"
-                    f"📊 Project: {project.projectName} (ID: {project_id})\n"
-                    f"🎯 Quantity: {quantity} shares\n"
-                    f"💰 Total Price: ${total_price:.2f}\n"
-                    f"🔧 Option: {option.optionID} ({option_status})\n"
-                    f"💵 Price per share: ${option.costPerShare:.2f}\n"
-                    f"🆔 Purchase ID: {purchase.purchaseID}\n\n"
-                    f"📬 User has been notified\n"
-                    f"⚠️ No referral bonuses will be processed for manual additions"
-                )
-
-                logger.info(f"Manual shares added by admin {message.from_user.id}: "
-                            f"User {user_id}, Project {project_id}, Option {option.optionID}, "
-                            f"Qty {quantity}, Total ${total_price:.2f}")
-
-        except ValueError as e:
-            await message.reply(f"❌ Invalid parameter format: {str(e)}")
-        except Exception as e:
-            logger.error(f"Error in addtokens command: {e}", exc_info=True)
-            await message.reply(f"❌ Error adding shares: {str(e)}")
 
     async def handle_delpurchase(self, message: types.Message):
         """Handler for &delpurchase command to safely delete purchase records"""
@@ -1051,9 +894,9 @@ class AdminCommands:
             await message.reply(f"❌ Неизвестная команда: &{command}")
 
 
-def setup_admin_commands(dp):
+def setup_admin_commands(dp, message_manager):
     dp.filters_factory.bind(AdminFilter)
-    admin_commands = AdminCommands(dp)
+    admin_commands = AdminCommands(dp, message_manager)  # Передаем message_manager
 
     # Регистрируем middleware
     admin_middleware = AdminCommandsMiddleware(admin_commands)

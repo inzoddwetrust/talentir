@@ -2583,7 +2583,7 @@ async def handle_settings_language_select(user: User, callback_query: types.Call
 
 INFO_SCREENS = {
     "/help": {
-        "template_key": "/help",  # Ключ шаблона совпадает с callback
+        "template_key": "/help",
         "variables": lambda: {"faq_url": GlobalVariables()._variables.get('faq_url', "")}  # Прямой доступ к кэшу
     },
     "/help/contacts": {
@@ -3006,7 +3006,7 @@ async def main():
     """Основная асинхронная функция"""
     try:
         global_vars = await setup()
-        setup_admin_commands(dp)
+        setup_admin_commands(dp, message_manager)
         await get_bot_username()
         services = await start_services(global_vars)
         logger.info("Application setup completed")
