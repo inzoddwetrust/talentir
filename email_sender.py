@@ -146,7 +146,15 @@ class MailgunProvider:
 
             # Prepare request data
             data = aiohttp.FormData()
-            data.add_field('from', f"{config.EMAIL_FROM_NAME} <{config.EMAIL_FROM}>")
+
+            # Используем специальный email для Mailgun
+            from_email = getattr(config, 'MAILGUN_FROM_EMAIL', f"noreply@{self.domain}")
+            from_name = config.EMAIL_FROM_NAME
+            from_address = f"{from_name} <{from_email}>"
+
+            logger.debug(f"Using from address: {from_address}")
+
+            data.add_field('from', from_address)
             data.add_field('to', to)
             data.add_field('subject', subject)
             data.add_field('html', html_body)

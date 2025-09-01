@@ -161,6 +161,7 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 MAILGUN_API_KEY = os.getenv("MAILGUN_API_KEY", "")
 MAILGUN_DOMAIN = os.getenv("MAILGUN_DOMAIN", "mg.jetup.info")
 MAILGUN_REGION = os.getenv("MAILGUN_REGION", "eu")
+MAILGUN_FROM_EMAIL = os.getenv("MAILGUN_FROM_EMAIL", "noreply@jetup.info")
 
 # Email общие настройки
 EMAIL_FROM = os.getenv("EMAIL_FROM", "noreply@jetup.info")
