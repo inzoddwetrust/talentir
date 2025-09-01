@@ -128,9 +128,6 @@ class MailgunProvider:
         else:
             self.base_url = "https://api.mailgun.net/v3"
 
-        # Prepare auth header
-        self.auth_header = "Basic " + base64.b64encode(f"api:{api_key}".encode()).decode()
-
     async def send_email(self, to: str, subject: str, html_body: str, text_body: Optional[str] = None) -> bool:
         """
         Send email via Mailgun API
@@ -157,11 +154,11 @@ class MailgunProvider:
             if text_body:
                 data.add_field('text', text_body)
 
-            # Send request
+            # Send request with proper auth
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                         f"{self.base_url}/{self.domain}/messages",
-                        headers={"Authorization": self.auth_header},
+                        auth=aiohttp.BasicAuth("api", self.api_key),
                         data=data,
                         timeout=aiohttp.ClientTimeout(total=30)
                 ) as response:
@@ -197,7 +194,7 @@ class MailgunProvider:
             async with aiohttp.ClientSession() as session:
                 async with session.get(
                         f"{self.base_url}/domains/{self.domain}",
-                        headers={"Authorization": self.auth_header},
+                        auth=aiohttp.BasicAuth("api", self.api_key),
                         timeout=aiohttp.ClientTimeout(total=10)
                 ) as response:
                     if response.status == 200:
