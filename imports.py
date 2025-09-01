@@ -286,7 +286,8 @@ class ConfigImporter:
         # Список переменных config, которые можно обновлять
         updateable_vars = [
             'PURCHASE_BONUSES', 'STRATEGY_COEFFICIENTS', 'TRANSFER_BONUS',
-            'SOCIAL_LINKS', 'FAQ_URL', 'REQUIRED_CHANNELS', 'PROJECT_DOCUMENTS'
+            'SOCIAL_LINKS', 'FAQ_URL', 'REQUIRED_CHANNELS', 'PROJECT_DOCUMENTS',
+            'SECURE_EMAIL_DOMAINS'
         ]
 
         for var_name in updateable_vars:

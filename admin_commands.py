@@ -174,6 +174,14 @@ class AdminCommands:
                 if config_name in config_dict:
                     global_vars.set_static_variable(var_name, config_dict[config_name])
 
+            # Reload secure domains in EmailManager after config update
+            try:
+                from email_sender import email_manager
+                email_manager.reload_secure_domains()
+                logger.info("Email secure domains reloaded after config update")
+            except Exception as e:
+                logger.warning(f"Could not reload email secure domains: {e}")
+
             # Формируем отчет об обновлении
             config_items = []
             for key, value in config_dict.items():
@@ -198,120 +206,66 @@ class AdminCommands:
             await message.reply(error_msg)
 
     async def handle_testmail(self, message: types.Message):
-        """Команда &testmail - полное тестирование email системы"""
+        """Test email functionality with smart provider selection"""
+        reply = await message.reply("🔄 Проверяем email систему...")
+
         try:
-            reply = await message.reply("🔄 Тестируем email систему...")
-
-            # Парсим аргумент если есть
-            command_parts = message.text.split(maxsplit=1)
+            # Parse command: &testmail [email] [provider]
+            parts = message.text.split()
             custom_email = None
+            forced_provider = None
 
-            if len(command_parts) > 1:
-                custom_email = command_parts[1].strip()
+            if len(parts) > 1:
+                custom_email = parts[1]
+            if len(parts) > 2:
+                forced_provider = parts[2].lower()
+                if forced_provider not in ['smtp', 'mailgun']:
+                    await reply.edit_text(f"❌ Неизвестный провайдер: {forced_provider}\n"
+                                          f"Доступны: smtp, mailgun")
+                    return
+
+            # Validate custom email if provided
+            if custom_email:
                 import re
                 if not re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', custom_email):
                     await reply.edit_text(f"❌ Некорректный email: {custom_email}")
                     return
 
-            # 1. Проверяем конфигурацию
-            smtp_config = {
-                'host': getattr(config, 'SMTP_HOST', 'не установлен'),
-                'port': getattr(config, 'SMTP_PORT', 'не установлен'),
-                'user': getattr(config, 'SMTP_USER', 'не установлен'),
-                'password': '***' if hasattr(config, 'SMTP_PASSWORD') and config.SMTP_PASSWORD else 'не установлен'
-            }
-
-            config_text = "\n".join([f"• {k}: {v}" for k, v in smtp_config.items()])
-
-            # Проверяем наличие всех настроек
-            if 'не установлен' in smtp_config.values() or smtp_config['password'] == 'не установлен':
-                await reply.edit_text(
-                    f"❌ SMTP не настроен!\n\n"
-                    f"📋 Текущая конфигурация:\n{config_text}\n\n"
-                    f"Проверьте .env файл:\n"
-                    f"• SMTP_HOST\n"
-                    f"• SMTP_PORT\n"
-                    f"• SMTP_USER\n"
-                    f"• SMTP_PASSWORD"
-                )
-                return
-
-            await reply.edit_text(f"📋 Конфигурация SMTP:\n{config_text}\n\n"
-                                  f"🔗 Проверяем прямое подключение...")
-
-            # 2. Тестируем прямое SMTP подключение
-            import aiosmtplib
-
-            try:
-                smtp = aiosmtplib.SMTP(
-                    hostname=config.SMTP_HOST,
-                    port=config.SMTP_PORT,
-                    timeout=10
-                )
-
-                await smtp.connect()
-                await reply.edit_text(f"📋 Конфигурация SMTP:\n{config_text}\n\n"
-                                      f"✅ Подключение установлено\n\n"
-                                      f"🔐 Проверяем аутентификацию...")
-
-                # 3. Проверяем аутентификацию
-                try:
-                    await smtp.starttls()
-                except Exception as e:
-                    if "already using TLS" not in str(e):
-                        raise
-
-                await smtp.login(config.SMTP_USER, config.SMTP_PASSWORD)
-                await smtp.quit()
-
-                await reply.edit_text(f"📋 Конфигурация SMTP:\n{config_text}\n\n"
-                                      f"✅ Подключение установлено\n"
-                                      f"✅ Аутентификация успешна\n\n"
-                                      f"📧 Проверяем EmailManager...")
-
-            except asyncio.TimeoutError:
-                await reply.edit_text(f"📋 Конфигурация SMTP:\n{config_text}\n\n"
-                                      f"❌ Таймаут подключения к {config.SMTP_HOST}:{config.SMTP_PORT}\n\n"
-                                      f"Возможные причины:\n"
-                                      f"• Неверный хост или порт\n"
-                                      f"• Блокировка фаерволом\n"
-                                      f"• SMTP сервер не запущен")
-                return
-
-            except aiosmtplib.SMTPAuthenticationError as e:
-                await reply.edit_text(f"📋 Конфигурация SMTP:\n{config_text}\n\n"
-                                      f"✅ Подключение установлено\n"
-                                      f"❌ Ошибка аутентификации:\n{str(e)}\n\n"
-                                      f"Проверьте:\n"
-                                      f"• Правильность логина/пароля\n"
-                                      f"• Существует ли пользователь {config.SMTP_USER}")
-                return
-
-            except Exception as e:
-                await reply.edit_text(f"📋 Конфигурация SMTP:\n{config_text}\n\n"
-                                      f"❌ Ошибка подключения: {str(e)}")
-                return
-
-            # 4. Тестируем через EmailManager
+            # 1. Check providers configuration
             from email_sender import email_manager
 
             if not email_manager.providers:
-                await reply.edit_text(f"📋 Конфигурация SMTP:\n{config_text}\n\n"
-                                      f"✅ Прямое подключение работает\n\n"
-                                      f"❌ EmailManager не инициализирован!\n"
-                                      f"Перезапустите бота")
+                await reply.edit_text("❌ Email провайдеры не настроены!\nПроверьте .env файл")
                 return
 
-            # Проверяем статус провайдеров
+            # 2. Test all providers
+            await reply.edit_text("📊 Проверяем провайдеры...")
+
             providers_status = await email_manager.get_providers_status()
 
             status_text = []
+            working_providers = []
+
             for provider_name, is_working in providers_status.items():
-                status_text.append(f"{'✅' if is_working else '❌'} {provider_name}")
+                if provider_name == 'smtp':
+                    config_info = f"({config.SMTP_HOST}:{config.SMTP_PORT})"
+                elif provider_name == 'mailgun':
+                    config_info = f"({config.MAILGUN_DOMAIN}, {config.MAILGUN_REGION})"
+                else:
+                    config_info = ""
+
+                status = "✅ OK" if is_working else "❌ FAIL"
+                status_text.append(f"• {provider_name.upper()} {config_info}: {status}")
+
+                if is_working:
+                    working_providers.append(provider_name)
 
             status_report = "\n".join(status_text)
 
-            # 5. Определяем target email и отправляем тестовое письмо
+            # 3. Check secure domains configuration
+            secure_domains_info = f"📋 Секурные домены: {', '.join(email_manager.secure_domains) if email_manager.secure_domains else 'не настроены'}"
+
+            # 4. Determine target email
             with Session() as session:
                 if custom_email:
                     target_email = custom_email
@@ -319,74 +273,121 @@ class AdminCommands:
                 else:
                     user = session.query(User).filter_by(telegramID=message.from_user.id).first()
                     if not user or not user.email:
-                        await reply.edit_text(f"📋 Конфигурация SMTP:\n{config_text}\n\n"
-                                              f"✅ SMTP подключение работает\n"
-                                              f"📊 Статус EmailManager:\n{status_report}\n\n"
-                                              f"❌ Не могу отправить тест-письмо!\n"
-                                              f"У вас не указан email\n\n"
-                                              f"Используйте: &testmail email@example.com")
+                        await reply.edit_text(
+                            f"📊 **Статус провайдеров:**\n{status_report}\n\n"
+                            f"{secure_domains_info}\n\n"
+                            f"❌ У вас не указан email!\n\n"
+                            f"Используйте: `&testmail email@example.com [smtp|mailgun]`"
+                        )
                         return
                     target_email = user.email
                     firstname = user.firstname
 
-                await reply.edit_text(f"📋 Конфигурация SMTP:\n{config_text}\n\n"
-                                      f"✅ SMTP подключение работает\n"
-                                      f"📊 Статус EmailManager:\n{status_report}\n\n"
-                                      f"📤 Отправляем тест-письмо на {target_email}...")
-
-                # Отправляем тестовое письмо
-                test_html = f"""
-                <html>
-                <body>
-                    <h2>🎉 Тест email системы JetUP</h2>
-                    <p>Привет, <strong>{firstname}</strong>!</p>
-                    <p>Если вы видите это письмо, значит email система работает корректно.</p>
-
-                    <hr>
-
-                    <h3>📊 Детали теста:</h3>
-                    <ul>
-                        <li><strong>Сервер:</strong> {config.SMTP_HOST}:{config.SMTP_PORT}</li>
-                        <li><strong>Пользователь:</strong> {config.SMTP_USER}</li>
-                        <li><strong>Время:</strong> {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC</li>
-                        <li><strong>Отправлено через:</strong> EmailManager</li>
-                    </ul>
-
-                    <hr>
-                    <p><small>Это автоматическое письмо от Talentir Bot</small></p>
-                </body>
-                </html>
-                """
-
-                success = await email_manager.send_notification_email(
-                    to=target_email,
-                    subject="✅ Тест Email Системы Talentir",
-                    body=test_html
-                )
-
-                if success:
+            # 5. Determine which provider will be used
+            if forced_provider:
+                # Use forced provider
+                if forced_provider not in working_providers:
                     await reply.edit_text(
-                        f"🎉 **Email система полностью работает!**\n\n"
-                        f"📋 Конфигурация SMTP:\n{config_text}\n\n"
-                        f"✅ Прямое подключение: OK\n"
-                        f"✅ Аутентификация: OK\n"
-                        f"✅ EmailManager: OK\n"
-                        f"✅ Отправка писем: OK\n\n"
-                        f"📧 Тест-письмо отправлено на {target_email}\n"
-                        f"📬 Проверьте почту (включая папку спам)!"
+                        f"📊 **Статус провайдеров:**\n{status_report}\n\n"
+                        f"❌ Провайдер {forced_provider.upper()} не работает!"
                     )
+                    return
+                selected_provider = forced_provider
+                selection_reason = "форсирован пользователем"
+            else:
+                # Use smart selection
+                provider_order = email_manager._select_provider_for_email(target_email)
+                if not provider_order:
+                    await reply.edit_text(
+                        f"📊 **Статус провайдеров:**\n{status_report}\n\n"
+                        f"❌ Нет доступных провайдеров для {target_email}"
+                    )
+                    return
+
+                selected_provider = provider_order[0]
+                domain = email_manager._get_email_domain(target_email)
+
+                if domain in email_manager.secure_domains:
+                    selection_reason = f"домен {domain} в списке секурных"
                 else:
-                    await reply.edit_text(
-                        f"⚠️ **Частичная работоспособность**\n\n"
-                        f"📋 Конфигурация SMTP:\n{config_text}\n\n"
-                        f"✅ Прямое подключение: OK\n"
-                        f"✅ Аутентификация: OK\n"
-                        f"❌ EmailManager: Ошибка отправки\n\n"
-                        f"Возможные причины:\n"
-                        f"• Проблема с форматированием письма\n"
-                        f"• Ограничения на отправку\n"
-                        f"• Проверьте логи: journalctl -u talentir-bot -f"
-                    )
+                    selection_reason = f"домен {domain} обычный"
+
+            # 6. Send test email
+            await reply.edit_text(
+                f"📊 **Статус провайдеров:**\n{status_report}\n\n"
+                f"{secure_domains_info}\n\n"
+                f"📤 Отправляем тест на {target_email}\n"
+                f"🎯 Используем: **{selected_provider.upper()}** ({selection_reason})..."
+            )
+
+            # Prepare test email
+            test_html = f"""
+            <html>
+            <body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 20px; border-radius: 10px 10px 0 0;">
+                    <h1 style="color: white; margin: 0;">🚀 JetUp Email Test</h1>
+                </div>
+
+                <div style="padding: 20px; background: #f5f5f5;">
+                    <p>Привет, <strong>{firstname}</strong>!</p>
+
+                    <div style="background: white; padding: 15px; border-radius: 8px; margin: 15px 0;">
+                        <h3 style="color: #667eea; margin-top: 0;">📊 Детали отправки:</h3>
+                        <ul style="list-style-type: none; padding-left: 0;">
+                            <li>📧 <strong>Получатель:</strong> {target_email}</li>
+                            <li>🔧 <strong>Провайдер:</strong> {selected_provider.upper()}</li>
+                            <li>📝 <strong>Причина выбора:</strong> {selection_reason}</li>
+                            <li>⏰ <strong>Время:</strong> {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC</li>
+                        </ul>
+                    </div>
+
+                    <div style="background: #e8f4fd; padding: 15px; border-radius: 8px; border-left: 4px solid #2196F3;">
+                        <p style="margin: 0;"><strong>✅ Email система работает корректно!</strong></p>
+                        <p style="margin: 5px 0 0 0; font-size: 14px; color: #666;">
+                            Это письмо отправлено через {selected_provider.upper()} провайдер.
+                        </p>
+                    </div>
+                </div>
+
+                <div style="padding: 15px; background: #333; color: #999; font-size: 12px; text-align: center;">
+                    <p style="margin: 0;">JetUp Investment Bot | Automated Test Email</p>
+                </div>
+            </body>
+            </html>
+            """
+
+            # Send through selected provider directly
+            provider = email_manager.providers[selected_provider]
+            success = await provider.send_email(
+                to=target_email,
+                subject=f"✅ Test Email via {selected_provider.upper()} | JetUp",
+                html_body=test_html,
+                text_body=None
+            )
+
+            if success:
+                fallback_info = ""
+                if len(provider_order) > 1:
+                    fallback_info = f"\n💡 Fallback провайдер: {provider_order[1].upper()}"
+
+                await reply.edit_text(
+                    f"🎉 **Email система работает!**\n\n"
+                    f"📊 **Статус провайдеров:**\n{status_report}\n\n"
+                    f"{secure_domains_info}\n\n"
+                    f"✅ **Тест отправлен:**\n"
+                    f"• Получатель: {target_email}\n"
+                    f"• Провайдер: {selected_provider.upper()}\n"
+                    f"• Причина: {selection_reason}{fallback_info}\n\n"
+                    f"📬 Проверьте почту (включая папку спам)!"
+                )
+            else:
+                await reply.edit_text(
+                    f"⚠️ **Ошибка отправки**\n\n"
+                    f"📊 **Статус провайдеров:**\n{status_report}\n\n"
+                    f"{secure_domains_info}\n\n"
+                    f"❌ Не удалось отправить через {selected_provider.upper()}\n\n"
+                    f"Проверьте логи: `journalctl -u jetup-bot -f`"
+                )
 
         except Exception as e:
             await message.reply(f"❌ Критическая ошибка: {str(e)}")

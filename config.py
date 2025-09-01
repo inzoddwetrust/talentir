@@ -156,3 +156,16 @@ SMTP_HOST = os.getenv("SMTP_HOST", "mail.jetup.info")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER = os.getenv("SMTP_USER", "noreply@jetup.info")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+
+# Mailgun настройки (из .env)
+MAILGUN_API_KEY = os.getenv("MAILGUN_API_KEY", "")
+MAILGUN_DOMAIN = os.getenv("MAILGUN_DOMAIN", "mg.jetup.info")
+MAILGUN_REGION = os.getenv("MAILGUN_REGION", "eu")
+
+# Email общие настройки
+EMAIL_FROM = os.getenv("EMAIL_FROM", "noreply@jetup.info")
+EMAIL_FROM_NAME = os.getenv("EMAIL_FROM_NAME", "JetUp")
+
+# Список "секурных" доменов для отправки через Mailgun (загружается из Google Sheets)
+# Формат: "@t-online.de,@gmx.de,@web.de"
+SECURE_EMAIL_DOMAINS = ""  # Будет загружено через &upconfig из листа Config
