@@ -2942,10 +2942,9 @@ async def setup():
     global_vars.set_static_variable('Session', Session)
     global_vars.set_static_variable('message_manager', message_manager)
 
-    # И пересоздаем email_manager с новыми настройками
-    from email_sender import EmailManager
-    global email_manager
-    email_manager = EmailManager()
+    # Пересоздаем email_manager с новыми настройками
+    import email_sender
+    email_sender.email_manager = email_sender.EmailManager()
     logger.info("EmailManager reinitialized with updated config")
 
     bookstack_manager = BookStackManager()

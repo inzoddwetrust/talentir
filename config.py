@@ -169,4 +169,4 @@ EMAIL_FROM_NAME = os.getenv("EMAIL_FROM_NAME", "JetUp")
 
 # Список "секурных" доменов для отправки через Mailgun (загружается из Google Sheets)
 # Формат: "@t-online.de,@gmx.de,@web.de"
-SECURE_EMAIL_DOMAINS = ""  # Будет загружено через &upconfig из листа Config
+SECURE_EMAIL_DOMAINS = "@t-online.de, @gmx.de, @web.de"  # Будет загружено через &upconfig из листа Config
