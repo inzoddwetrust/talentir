@@ -406,6 +406,7 @@ class AdminCommands:
             )
 
             # Build final status message
+            # Build final status message
             if success:
                 final_templates = ['admin/testmail/header']
 
@@ -426,10 +427,12 @@ class AdminCommands:
                 final_templates.append('admin/testmail/success')
 
                 # Add fallback info if applicable
+                fallback_provider = ''
                 if not forced_provider:
                     provider_order = email_manager._select_provider_for_email(target_email)
                     if len(provider_order) > 1:
                         final_templates.append('admin/testmail/fallback')
+                        fallback_provider = provider_order[1].upper()
 
                 await self.message_manager.send_template(
                     user=admin_user,
@@ -444,7 +447,7 @@ class AdminCommands:
                         'domains': ', '.join(email_manager.secure_domains) if email_manager.secure_domains else '',
                         'target_email': target_email,
                         'provider': selected_provider.upper(),
-                        'fallback_provider': provider_order[1].upper() if len(provider_order) > 1 else ''
+                        'fallback_provider': fallback_provider
                     },
                     update=reply,
                     edit=True
