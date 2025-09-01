@@ -2927,9 +2927,26 @@ async def setup():
     await MessageTemplates.load_templates()
     logger.info("Message templates loaded")
 
+    # Load configuration from Google Sheets ПЕРЕД инициализацией переменных!
+    logger.info("Loading configuration from Google Sheets...")
+    try:
+        from imports import ConfigImporter
+        config_dict = await ConfigImporter.import_config()
+        ConfigImporter.update_config_module(config_dict)
+        logger.info(f"Loaded {len(config_dict)} config variables from Google Sheets")
+    except Exception as e:
+        logger.error(f"Failed to load config from Google Sheets: {e}")
+
+    # Теперь инициализируем переменные с обновленными значениями
     global_vars = initialize_variables()
     global_vars.set_static_variable('Session', Session)
     global_vars.set_static_variable('message_manager', message_manager)
+
+    # И пересоздаем email_manager с новыми настройками
+    from email_sender import EmailManager
+    global email_manager
+    email_manager = EmailManager()
+    logger.info("EmailManager reinitialized with updated config")
 
     bookstack_manager = BookStackManager()
     if bookstack_manager.is_available():

@@ -478,5 +478,14 @@ class EmailManager:
         logger.info("Reloading secure email domains configuration...")
         self._load_secure_domains()
 
-# Singleton instance
+# Singleton instance (will be reinitialized in main.py after config loads)
+email_manager = None
+
+def init_email_manager():
+    """Initialize or reinitialize email manager"""
+    global email_manager
+    email_manager = EmailManager()
+    return email_manager
+
+# Initial creation
 email_manager = EmailManager()
