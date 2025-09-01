@@ -93,9 +93,16 @@ class SMTPProvider:
             logger.info(f"Testing SMTP connection to {self.smtp_host}:{self.smtp_port}")
 
             # Try to connect and authenticate
-            smtp = aiosmtplib.SMTP(hostname=self.smtp_host, port=self.smtp_port)
+            smtp = aiosmtplib.SMTP(hostname=self.smtp_host, port=self.smtp_port, use_tls=False)
             await smtp.connect()
-            await smtp.starttls()
+
+            # Only start TLS if not already secured
+            if not smtp.is_connected:
+                return False
+
+            if self.smtp_port == 587:  # STARTTLS port
+                await smtp.starttls()
+
             await smtp.login(self.username, self.password)
             await smtp.quit()
 
