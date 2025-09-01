@@ -290,9 +290,16 @@ class AdminCommands:
 
             # Determine target email
             with Session() as session:
+                admin_user_db = session.query(User).filter_by(telegramID=message.from_user.id).first()
+
                 if custom_email:
                     target_email = custom_email
-                    firstname = "Test User"
+                    # Если админ тестирует свой собственный email - используем его имя
+                    if admin_user_db and admin_user_db.email == custom_email:
+                        firstname = admin_user_db.firstname
+                    else:
+                        firstname = "Test User"
+
                 else:
                     user = session.query(User).filter_by(telegramID=message.from_user.id).first()
                     if not user or not user.email:
@@ -405,7 +412,6 @@ class AdminCommands:
                 text_body=None
             )
 
-            # Build final status message
             # Build final status message
             if success:
                 final_templates = ['admin/testmail/header']
