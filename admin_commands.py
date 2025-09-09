@@ -1,8 +1,11 @@
 import logging
 import asyncio
+import os
 from aiogram.dispatcher.filters import Filter
 from aiogram.dispatcher import FSMContext
 from aiogram import types
+import shutil
+from typing import Dict
 from aiogram.dispatcher.handler import CancelHandler
 from aiogram.dispatcher.middlewares import BaseMiddleware
 from bookstack_integration import clear_template_cache
@@ -13,6 +16,8 @@ from imports import (
     ConfigImporter, import_all
 )
 
+from sync_system.sync_engine import UniversalSyncEngine
+from sync_system.sync_config import SYNC_CONFIG, SUPPORT_TABLES
 from database import Bonus, Project, Purchase, ActiveBalance, PassiveBalance
 from templates import MessageTemplates
 from google_services import get_google_services
@@ -142,6 +147,224 @@ class AdminCommands:
             error_msg = f"❌ Ошибка: {str(e)}"
             logger.error(error_msg, exc_info=True)
             await reply.edit_text(error_msg)
+
+    async def handle_restore(self, message: types.Message):
+        """&restore [backup_file] - восстановление из бэкапа"""
+        args = message.text.split()[1:] if len(message.text.split()) > 1 else []
+
+        if not args:
+            # Показываем список доступных бэкапов
+            backup_dir = "/opt/talentir/backups/import"
+            if os.path.exists(backup_dir):
+                backups = sorted([f for f in os.listdir(backup_dir) if f.endswith('.db')])[-5:]
+                if backups:
+                    backup_list = "\n".join(backups)
+                    await message.reply(
+                        f"📁 Доступные бэкапы:\n{backup_list}\n\n"
+                        "Использование: &restore [имя_файла]"
+                    )
+                else:
+                    await message.reply("Нет доступных бэкапов")
+            return
+
+        backup_name = args[0]
+        backup_path = f"/opt/talentir/backups/import/{backup_name}"
+
+        if not os.path.exists(backup_path):
+            await message.reply(f"❌ Бэкап не найден: {backup_name}")
+            return
+
+        try:
+            # Создаем бэкап текущей БД перед восстановлением
+            current_backup = await self._create_backup()
+
+            # Восстанавливаем из бэкапа
+            shutil.copy2(backup_path, "/opt/talentir/bot/data/talentir.db")
+
+            await message.reply(
+                f"✅ БД восстановлена из бэкапа: {backup_name}\n"
+                f"Предыдущее состояние сохранено в: {os.path.basename(current_backup)}"
+            )
+
+        except Exception as e:
+            await message.reply(f"❌ Ошибка восстановления: {str(e)}")
+
+    async def handle_import(self, message: types.Message):
+        """
+        &import [table] [mode]
+        Импорт данных из Google Sheets в БД
+        Режимы: dry (проверка), safe (по умолчанию), force
+        """
+        args = message.text.split()[1:] if len(message.text.split()) > 1 else []
+
+        # Парсим аргументы
+        table = args[0].lower() if args else None
+        mode = args[1].lower() if len(args) > 1 else 'safe'
+
+        # Проверка аргументов
+        if not table:
+            tables_list = ", ".join([t.lower() for t in SUPPORT_TABLES])
+            await message.reply(
+                "📋 Использование: &import [таблица] [режим]\n\n"
+                f"Таблицы: {tables_list}, all\n"
+                "Режимы:\n"
+                "• dry - проверка без изменений\n"
+                "• safe - импорт (по умолчанию)\n"
+                "• force - принудительный импорт"
+            )
+            return
+
+        # Определяем таблицы для импорта
+        if table == 'all':
+            tables_to_import = SUPPORT_TABLES
+        else:
+            # Находим правильное имя таблицы (с учетом регистра)
+            table_map = {name.lower(): name for name in SUPPORT_TABLES}
+            if table not in table_map:
+                await message.reply(f"❌ Неизвестная таблица: {table}")
+                return
+            tables_to_import = [table_map[table]]
+
+        # Создаем бэкап перед импортом (если не dry run)
+        backup_path = None
+        if mode != 'dry':
+            backup_path = await self._create_backup()
+            logger.info(f"Created backup: {backup_path}")
+
+        # Начинаем импорт
+        reply = await message.reply(
+            f"🔄 {'Проверка' if mode == 'dry' else 'Импорт'} таблиц: {', '.join(tables_to_import)}..."
+        )
+
+        all_results = {}
+        total_updated = 0
+        total_added = 0
+        total_errors = 0
+
+        try:
+            with Session() as session:
+                for table_name in tables_to_import:
+                    try:
+                        engine = UniversalSyncEngine(table_name)
+                        results = engine.import_from_sheets(session, dry_run=(mode == 'dry'))
+
+                        all_results[table_name] = results
+                        total_updated += results.get('updated', 0)
+                        total_added += results.get('added', 0)
+                        total_errors += len(results.get('errors', []))
+
+                    except Exception as e:
+                        logger.error(f"Failed to import {table_name}: {e}")
+                        all_results[table_name] = {'error': str(e)}
+                        total_errors += 1
+
+        except Exception as e:
+            logger.error(f"Critical import error: {e}")
+            await reply.edit_text(f"❌ Критическая ошибка: {str(e)}")
+            return
+
+        # Формируем отчет
+        report = self._format_import_report(all_results, mode, backup_path)
+
+        # Отправляем отчет (если слишком длинный - разбиваем)
+        if len(report) > 4000:
+            # Краткий отчет
+            short_report = (
+                f"{'✅' if total_errors == 0 else '⚠️'} "
+                f"{'Проверка' if mode == 'dry' else 'Импорт'} завершен\n\n"
+                f"Обновлено: {total_updated}\n"
+                f"Добавлено: {total_added}\n"
+                f"Ошибок: {total_errors}\n"
+            )
+            if backup_path:
+                short_report += f"\n💾 Бэкап: {backup_path}"
+
+            await reply.edit_text(short_report)
+
+            # Детали в отдельных сообщениях
+            for table_name, results in all_results.items():
+                if results.get('errors'):
+                    errors_text = f"❌ Ошибки в {table_name}:\n"
+                    for err in results['errors'][:5]:
+                        errors_text += f"Строка {err['row']}: {err['error']}\n"
+                    await message.answer(errors_text)
+        else:
+            await reply.edit_text(report)
+
+    async def _create_backup(self) -> str:
+        """Создает бэкап БД перед импортом"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        # Берем директорию из конфига
+        backup_dir = config.BACKUP_BASE_DIR
+        os.makedirs(backup_dir, exist_ok=True)
+
+        # ИСПРАВЛЕНИЕ: извлекаем путь из DATABASE_URL
+        if config.DATABASE_URL.startswith("sqlite:///"):
+            db_path = config.DATABASE_URL.replace("sqlite:///", "")
+        else:
+            raise ValueError(f"Unsupported DATABASE_URL format: {config.DATABASE_URL}")
+
+        # Проверяем что БД существует
+        if not os.path.exists(db_path):
+            raise FileNotFoundError(f"Database not found: {db_path}")
+
+        # Копируем БД
+        backup_filename = f"talentir_{timestamp}.db"
+        backup_path = os.path.join(backup_dir, backup_filename)
+        shutil.copy2(db_path, backup_path)
+
+        # Удаляем старые бэкапы (оставляем последние 20)
+        backups = sorted([f for f in os.listdir(backup_dir) if f.endswith('.db')])
+        if len(backups) > 20:
+            for old_backup in backups[:-20]:
+                os.remove(os.path.join(backup_dir, old_backup))
+
+        logger.info(f"Created backup: {backup_path}")
+        return backup_path
+
+    def _format_import_report(self, results: Dict, mode: str, backup_path: str = None) -> str:
+        """Форматирует отчет об импорте"""
+        is_dry = mode == 'dry'
+
+        report = f"📊 {'Отчет проверки' if is_dry else 'Отчет импорта'}\n"
+        report += "=" * 30 + "\n\n"
+
+        for table_name, result in results.items():
+            if 'error' in result:
+                report += f"❌ {table_name}: {result['error']}\n\n"
+                continue
+
+            report += f"📋 {table_name}:\n"
+            report += f"  Всего строк: {result.get('total', 0)}\n"
+            report += f"  Обновлено: {result.get('updated', 0)}\n"
+            report += f"  Добавлено: {result.get('added', 0)}\n"
+            report += f"  Пропущено: {result.get('skipped', 0)}\n"
+
+            errors = result.get('errors', [])
+            if errors:
+                report += f"  ⚠️ Ошибок: {len(errors)}\n"
+                for err in errors[:3]:  # Показываем первые 3 ошибки
+                    report += f"    • Строка {err['row']}: {err['error']}\n"
+
+            # Показываем изменения в dry run
+            if is_dry and result.get('changes'):
+                report += f"  📝 Изменения (первые 5):\n"
+                for change in result['changes'][:5]:
+                    if change['action'] == 'update':
+                        report += f"    • ID {change['id']}: обновление\n"
+                        for field in change.get('fields', [])[:2]:
+                            report += f"      {field['field']}: {field['old']} → {field['new']}\n"
+                    elif change['action'] == 'add':
+                        report += f"    • ID {change['id']}: новая запись\n"
+
+            report += "\n"
+
+        if not is_dry and backup_path:
+            report += f"💾 Бэкап сохранен: {backup_path}\n"
+            report += f"Для отката: &restore {os.path.basename(backup_path)}\n"
+
+        return report
 
     async def handle_upconfig(self, message: types.Message):
         """Обработчик команды &upconfig для обновления конфигурации из Google Sheets"""
@@ -724,45 +947,18 @@ class AdminCommands:
         command = message.text[1:].split()[0].lower()
         logger.info(f"Processing admin command: {command}")
 
-        if command == "upall":
-            try:
-                reply = await message.reply("🔄 Начинаю полное обновление данных...")
+        # ОСНОВНЫЕ КОМАНДЫ
+        if command == "import":
+            await self.handle_import(message)
 
-                # Используем существующую функцию import_all
-                results = await import_all(self.dp.bot)
-
-                # Формируем отчет из результатов
-                report = []
-                for sheet_name, stats in results.items():
-                    if isinstance(stats, str):  # Если произошла ошибка
-                        report.append(f"\n❌ {sheet_name}: {stats}")
-                    else:
-                        report.append(f"\n📊 {sheet_name}:")
-                        report.append(f"Всего строк: {stats.total}")
-                        report.append(f"Обновлено: {stats.updated}")
-                        report.append(f"Добавлено: {stats.added}")
-                        report.append(f"Пропущено: {stats.skipped}")
-                        report.append(f"Ошибок: {stats.errors}")
-
-                        if stats.error_rows:
-                            report.append("Ошибки:")
-                            for row, error in stats.error_rows:
-                                report.append(f"• Строка {row}: {error}")
-
-                await reply.edit_text("✅ Обновление завершено!\n" + "\n".join(report))
-
-            except Exception as e:
-                error_msg = f"❌ Критическая ошибка при обновлении: {str(e)}"
-                logger.error(error_msg, exc_info=True)
-                await message.reply(error_msg)
-
-        elif command == "upuser":
-            await self._import_sheet(message, UserImporter, "Users")
+        elif command == "restore":
+            await self.handle_restore(message)
 
         elif command == "upconfig":
             await self.handle_upconfig(message)
 
         elif command == "upro":
+            # Обновление Projects и Options
             try:
                 clear_template_cache()
                 logger.info("BookStack template cache cleared")
@@ -774,6 +970,7 @@ class AdminCommands:
                 await message.reply(error_msg)
 
         elif command == "ut":
+            # Обновление шаблонов
             try:
                 reply = await message.reply("🔄 Обновляю шаблоны...")
                 await MessageTemplates.load_templates()
@@ -783,28 +980,21 @@ class AdminCommands:
                 logger.error(error_msg, exc_info=True)
                 await message.reply(error_msg)
 
-        elif command.startswith("addtokens"):
-            await self.handle_addtokens(message)
-
         elif command.startswith("delpurchase"):
             await self.handle_delpurchase(message)
 
         elif command == "testmail":
             await self.handle_testmail(message)
 
-        elif command == "clearprojects":
-            await self.handle_clearprojects(message)
-
         elif command == "legacy":
+            # Legacy миграция
             try:
                 reply = await message.reply("🔄 Проверяю legacy миграцию...")
 
                 from legacy_user_processor import legacy_processor
 
-                # Запускаем одну итерацию проверки
                 stats = await legacy_processor._process_legacy_users()
 
-                # Формируем подробный отчет
                 report = f"📊 Legacy Migration Report:\n\n"
                 report += f"📋 Total records: {stats.total_records}\n"
                 report += f"👤 Users found: {stats.users_found}\n"
@@ -813,25 +1003,10 @@ class AdminCommands:
                 report += f"✅ Completed: {stats.completed}\n"
                 report += f"❌ Errors: {stats.errors}\n"
 
-                # Добавляем информацию о дубликатах, если есть
-                if hasattr(stats, 'duplicate_purchases_prevented'):
-                    report += f"🛡️ Duplicate purchases prevented: {stats.duplicate_purchases_prevented}\n"
-
-                report += "\n"
-
                 if stats.users_found == 0 and stats.upliners_assigned == 0 and stats.purchases_created == 0:
-                    report += "🔍 No new legacy users found to process."
+                    report += "\n🔍 No new legacy users found to process."
                 else:
-                    report += "🎯 Legacy migration processing completed!"
-
-                # Добавляем детали ошибок если они есть
-                if stats.errors > 0 and stats.error_details:
-                    report += f"\n\n❌ Error details (showing first 5):\n"
-                    for i, (email, error) in enumerate(stats.error_details[:5]):
-                        report += f"• {email}: {error}\n"
-
-                    if len(stats.error_details) > 5:
-                        report += f"... and {len(stats.error_details) - 5} more errors"
+                    report += "\n🎯 Legacy migration processing completed!"
 
                 await reply.edit_text(report)
 
@@ -841,21 +1016,18 @@ class AdminCommands:
                 await message.reply(error_msg)
 
         elif command == "check":
+            # Проверка платежей
             try:
                 reply = await message.reply("🔍 Проверяю платежи...")
 
                 with Session() as session:
-                    # Получаем все неподтвержденные платежи
                     pending_payments = session.query(Payment).filter_by(status="check").all()
-
-                    # Считаем общую сумму неподтвержденных платежей
                     total_amount = session.query(func.sum(Payment.amount)).filter_by(status="check").scalar() or 0
 
-                    # Отправляем информацию о неподтвержденных платежах
                     if pending_payments:
                         report = f"💰 В системе ожидает проверки {len(pending_payments)} платежей на сумму ${total_amount:.2f}"
 
-                        # Удаляем старые уведомления для этих платежей
+                        # Удаляем старые уведомления
                         for payment in pending_payments:
                             existing_notifications = (
                                 session.query(Notification)
@@ -865,29 +1037,24 @@ class AdminCommands:
                                 )
                                 .all()
                             )
-
                             for notif in existing_notifications:
                                 session.delete(notif)
 
                         session.commit()
 
-                        # Создаем новые уведомления для каждого платежа
+                        # Создаем новые уведомления
                         notifications_created = 0
                         for payment in pending_payments:
-                            # Получаем пользователя для этого платежа
                             payer = session.query(User).filter_by(userID=payment.userID).first()
                             if not payer:
                                 continue
 
                             try:
-                                # Импортируем функцию создания уведомлений
-                                # Важно: это должно быть здесь, чтобы избежать циклических импортов
                                 from main import create_payment_check_notification
                                 await create_payment_check_notification(payment, payer)
                                 notifications_created += 1
                             except Exception as e:
-                                logger.error(f"Error creating notification for payment {payment.paymentID}: {e}",
-                                             exc_info=True)
+                                logger.error(f"Error creating notification for payment {payment.paymentID}: {e}")
 
                         report += f"\n✅ Создано {notifications_created} новых уведомлений для администраторов"
                         await reply.edit_text(report)
@@ -900,7 +1067,16 @@ class AdminCommands:
                 await message.reply(error_msg)
 
         else:
-            await message.reply(f"❌ Неизвестная команда: &{command}")
+            with Session() as session:
+                admin_user = session.query(User).filter_by(telegramID=message.from_user.id).first()
+            await self.message_manager.send_template(
+                user=admin_user,
+                template_key='admin/commands/help',
+                variables={
+                    'unknown_command': command
+                },
+                update=message
+            )
 
 
 def setup_admin_commands(dp, message_manager):

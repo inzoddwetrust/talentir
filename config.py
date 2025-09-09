@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 from txid_checker import TxidValidationCode
 
@@ -7,6 +8,14 @@ load_dotenv()
 
 # База данных
 DATABASE_URL = os.getenv("DATABASE_URL")
+BACKUP_BASE_DIR = Path(os.getenv("BACKUP_DIR", "./backups"))
+
+BACKUP_DIRS = {
+    'import': BACKUP_BASE_DIR / 'import',      # Перед импортом
+    'daily': BACKUP_BASE_DIR / 'daily',        # Ежедневные
+    'manual': BACKUP_BASE_DIR / 'manual',      # Ручные бэкапы
+    'restore': BACKUP_BASE_DIR / 'restore'     # Для восстановления
+}
 
 # Google API
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
@@ -166,7 +175,7 @@ MAILGUN_FROM_EMAIL = os.getenv("MAILGUN_FROM_EMAIL", "noreply@jetup.info")
 # Email общие настройки
 EMAIL_FROM = os.getenv("EMAIL_FROM", "noreply@jetup.info")
 EMAIL_FROM_NAME = os.getenv("EMAIL_FROM_NAME", "JetUp")
+SECURE_EMAIL_DOMAINS = "@t-online.de, @gmx.de, @web.de"
 
-# Список "секурных" доменов для отправки через Mailgun (загружается из Google Sheets)
-# Формат: "@t-online.de,@gmx.de,@web.de"
-SECURE_EMAIL_DOMAINS = "@t-online.de, @gmx.de, @web.de"  # Будет загружено через &upconfig из листа Config
+WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "8080"))
+WEBHOOK_SECRET_KEY = os.getenv("WEBHOOK_SECRET_KEY", "error")

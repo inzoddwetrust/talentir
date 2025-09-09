@@ -19,7 +19,6 @@ from notificator import NotificationProcessor
 from invoice_cleaner import InvoiceCleaner
 from userdatamanager import UserDataManager
 from variables import GlobalVariables, initialize_variables
-from exports import SheetsExporter
 from bonus_processor import process_purchase_with_bonuses
 from admin_commands import setup_admin_commands
 from message_manager import MessageManager
@@ -27,6 +26,7 @@ from transfer_manager import TransferManager
 from user_decorator import with_user
 from bookstack_integration import BookStackManager
 from legacy_user_processor import legacy_processor
+from sync_system.webhook_handler import start_webhook_server
 import config
 import helpers
 
@@ -2987,11 +2987,10 @@ async def start_services(global_vars):
         name="invoice_cleaner"
     ))
 
-    sheets_exporter = SheetsExporter()
-    services.append(asyncio.create_task(
-        sheets_exporter.start(),
-        name="sheets_exporter"
-    ))
+    # Запускаем webhook для синхронизации
+    webhook_runner = await start_webhook_server()
+    services.append(webhook_runner)
+    logger.info("Webhook server started for Google Sheets sync")
 
     # Добавляем legacy процессор
     services.append(asyncio.create_task(

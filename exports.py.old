@@ -26,7 +26,6 @@ class SheetsExporter:
         self.worksheets = {}
         self._running = False
         self.logger = logger or logging.getLogger('exports')
-        self.logger.setLevel(logging.DEBUG)  # Временно устанавливаем уровень DEBUG
 
         # Метаданные последней синхронизации
         self.last_sync = {
@@ -102,8 +101,6 @@ class SheetsExporter:
                     if self.user_needs_update(user_data, sheet_row["data"]):
                         self.logger.debug(f"User {user.userID} needs update")
                         updates.append((sheet_row["row_index"], user_data))
-                    else:
-                        self.logger.debug(f"User {user.userID} is up to date")
                 else:
                     self.logger.debug(f"User {user.userID} will be added as new")
                     new_records.append(user_data)
@@ -141,7 +138,7 @@ class SheetsExporter:
                         payment.userID,
                         payment.firstname,
                         payment.surname,
-                        payment.direction,  # Added direction field
+                        payment.direction,
                         payment.amount,
                         payment.method,
                         payment.fromWallet or "",
