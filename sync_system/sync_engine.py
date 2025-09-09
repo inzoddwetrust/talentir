@@ -92,6 +92,7 @@ class UniversalSyncEngine:
             'added': 0,
             'skipped': 0,
             'errors': [],
+            'warnings': [],  # Добавляем поле для предупреждений
             'changes': []
         }
 
@@ -116,53 +117,81 @@ class UniversalSyncEngine:
                     if value == '' or value is None:
                         clean_row[clean_key] = None
                     elif isinstance(value, str):
-                        # Убираем невидимые символы из значений
-                        clean_value = value.strip().replace('\u200b', '').replace('\xa0', ' ')
-                        clean_row[clean_key] = clean_value if clean_value else None
+                        # Убираем лишние пробелы, но сохраняем содержимое
+                        clean_row[clean_key] = value.strip() if value.strip() else None
                     else:
                         clean_row[clean_key] = value
 
-                sheet_records.append(clean_row)
+                # Пропускаем полностью пустые строки
+                if any(v is not None for v in clean_row.values()):
+                    sheet_records.append(clean_row)
 
             results['total'] = len(sheet_records)
 
-            # Для Users собираем все существующие telegramID
-            existing_telegram_ids = set()
-            if self.table_name == 'Users':
-                existing_users = session.query(self.model).all()
-                existing_telegram_ids = {user.telegramID for user in existing_users}
+            # Переменные для отслеживания повторяющихся ошибок
+            consecutive_errors = 0
+            last_error = ""
 
             # Обрабатываем каждую строку
-            consecutive_errors = 0
-            last_error = None
-
             for row_idx, row in enumerate(sheet_records, start=2):
                 try:
-                    # Проверка обязательных полей для Users
+                    # Проверяем балансы ПЕРЕД обработкой строки
+                    balance_warning = None
                     if self.table_name == 'Users':
-                        telegram_id = row.get('telegramID')
-                        if not telegram_id:
-                            logger.warning(f"Row {row_idx}: Skipping user {row.get('userID')} - no telegramID")
-                            results['skipped'] += 1
-                            results['errors'].append({
-                                'row': row_idx,
-                                'error': 'Missing telegramID',
-                                'id': row.get('userID')
-                            })
-                            continue
+                        balance_fields = ['balanceActive', 'balancePassive']
+                        for field in balance_fields:
+                            if field in row and row[field] is not None:
+                                # Парсим значение из таблицы
+                                sheet_value = row[field]
+                                try:
+                                    # Пробуем преобразовать в float
+                                    if isinstance(sheet_value, (int, float)):
+                                        sheet_value = float(sheet_value)
+                                    elif isinstance(sheet_value, str):
+                                        sheet_value = float(sheet_value.replace(',', '.'))
+                                    else:
+                                        sheet_value = 0.0
+                                except (ValueError, TypeError):
+                                    sheet_value = 0.0
+
+                                # Ищем существующую запись для проверки
+                                primary_value = row.get('telegramID')
+                                if primary_value:
+                                    existing = session.query(self.model).filter_by(telegramID=primary_value).first()
+                                    if existing:
+                                        db_value = float(getattr(existing, field, 0))
+                                        # Сравниваем с точностью до 2 знаков
+                                        if abs(sheet_value - db_value) > 0.01:
+                                            warning_msg = f"Balance mismatch in {field}: DB={db_value}, sheet={sheet_value}. Balances can only be changed through transactions!"
+                                            logger.warning(f"Row {row_idx}: {warning_msg}")
+
+                                            results['warnings'].append({
+                                                'row': row_idx,
+                                                'warning': warning_msg,
+                                                'field': field,
+                                                'db_value': db_value,
+                                                'sheet_value': sheet_value
+                                            })
+                                            results['skipped'] += 1
+                                            balance_warning = True
+                                            break
+
+                    # Если есть предупреждение о балансе, пропускаем строку
+                    if balance_warning:
+                        continue
 
                     # Обрабатываем строку
                     result = self._process_row(session, row, row_idx, dry_run)
 
+                    # Обрабатываем результат
                     if result['action'] == 'update':
                         results['updated'] += 1
-                        if result.get('changes'):
-                            results['changes'].append({
-                                'row': row_idx,
-                                'id': row.get(self.primary_key),
-                                'action': 'update',
-                                'fields': result['changes']
-                            })
+                        results['changes'].append({
+                            'row': row_idx,
+                            'id': row.get(self.primary_key),
+                            'action': 'update',
+                            'fields': result['changes']
+                        })
                     elif result['action'] == 'add':
                         results['added'] += 1
                         results['changes'].append({
@@ -224,7 +253,8 @@ class UniversalSyncEngine:
                     session.commit()
                     logger.info(f"Import completed successfully")
 
-                logger.info(f"Results: {results['added']} added, {results['updated']} updated, {results['skipped']} skipped, {len(results['errors'])} errors")
+                logger.info(
+                    f"Results: {results['added']} added, {results['updated']} updated, {results['skipped']} skipped, {len(results['errors'])} errors, {len(results['warnings'])} warnings")
             else:
                 logger.info(f"Dry run completed, no changes applied")
 

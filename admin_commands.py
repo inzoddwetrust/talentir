@@ -109,45 +109,6 @@ class AdminCommands:
             else:
                 await message.reply(error_msg)
 
-    async def handle_clearprojects(self, message: types.Message):
-        """Команда &clearprojects - полная очистка и переимпорт проектов"""
-        reply = await message.reply("⚠️ ВНИМАНИЕ! Очищаю таблицу projects...")
-
-        try:
-            with Session() as session:
-                # Отключаем проверку внешних ключей
-                session.execute("PRAGMA foreign_keys = OFF")
-
-                # Удаляем все проекты
-                session.query(Project).delete()
-                session.commit()
-
-                # Включаем проверку обратно
-                session.execute("PRAGMA foreign_keys = ON")
-
-                await reply.edit_text("✅ Таблица projects очищена. Начинаю импорт...")
-
-                # Импортируем новые данные
-                sheets_client, _ = get_google_services()
-                sheet = sheets_client.open_by_key(config.GOOGLE_SHEET_ID).worksheet("Projects")
-
-                importer = ProjectImporter()
-                stats = await importer.import_sheet(sheet)
-
-                report = (
-                    f"✅ Импорт завершен:\n"
-                    f"Всего строк: {stats.total}\n"
-                    f"Добавлено: {stats.added}\n"
-                    f"Ошибок: {stats.errors}"
-                )
-
-                await reply.edit_text(report)
-
-        except Exception as e:
-            error_msg = f"❌ Ошибка: {str(e)}"
-            logger.error(error_msg, exc_info=True)
-            await reply.edit_text(error_msg)
-
     async def handle_restore(self, message: types.Message):
         """&restore [backup_file] - восстановление из бэкапа"""
         args = message.text.split()[1:] if len(message.text.split()) > 1 else []
@@ -190,106 +151,292 @@ class AdminCommands:
             await message.reply(f"❌ Ошибка восстановления: {str(e)}")
 
     async def handle_import(self, message: types.Message):
-        """
-        &import [table] [mode]
-        Импорт данных из Google Sheets в БД
-        Режимы: dry (проверка), safe (по умолчанию), force
-        """
-        args = message.text.split()[1:] if len(message.text.split()) > 1 else []
+        """Обработчик команды &import - полный импорт из Google Sheets"""
 
-        # Парсим аргументы
-        table = args[0].lower() if args else None
-        mode = args[1].lower() if len(args) > 1 else 'safe'
-
-        # Проверка аргументов
-        if not table:
-            tables_list = ", ".join([t.lower() for t in SUPPORT_TABLES])
-            await message.reply(
-                "📋 Использование: &import [таблица] [режим]\n\n"
-                f"Таблицы: {tables_list}, all\n"
-                "Режимы:\n"
-                "• dry - проверка без изменений\n"
-                "• safe - импорт (по умолчанию)\n"
-                "• force - принудительный импорт"
-            )
-            return
-
-        # Определяем таблицы для импорта
-        if table == 'all':
-            tables_to_import = SUPPORT_TABLES
-        else:
-            # Находим правильное имя таблицы (с учетом регистра)
-            table_map = {name.lower(): name for name in SUPPORT_TABLES}
-            if table not in table_map:
-                await message.reply(f"❌ Неизвестная таблица: {table}")
+        # Получаем админа и его язык
+        with Session() as session:
+            admin_user = session.query(User).filter_by(telegramID=message.from_user.id).first()
+            if not admin_user:
                 return
-            tables_to_import = [table_map[table]]
 
-        # Создаем бэкап перед импортом (если не dry run)
+        # Парсим параметры команды
+        command_parts = message.text.strip().split()
+        mode = 'dry'  # По умолчанию
+        tables_to_import = SUPPORT_TABLES.copy()
+
+        # Обрабатываем аргументы более гибко
+        if len(command_parts) > 1:
+            # Собираем все аргументы после команды
+            args = command_parts[1:]
+
+            # Ищем режим среди аргументов
+            mode_found = False
+            remaining_args = []
+            for arg in args:
+                if arg.lower() in ['dry', 'safe', 'force']:
+                    mode = arg.lower()
+                    mode_found = True
+                else:
+                    remaining_args.append(arg)
+
+            # Оставшиеся аргументы - это таблицы
+            if remaining_args:
+                # Может быть одна таблица или список через запятую
+                tables_str = ' '.join(remaining_args)
+                requested_tables = [t.strip() for t in tables_str.split(',')]
+
+                valid_tables = []
+                for table in requested_tables:
+                    # Проверяем с учетом регистра (Users, Payments и т.д.)
+                    found = False
+                    for supported_table in SUPPORT_TABLES:
+                        if table.lower() == supported_table.lower():
+                            valid_tables.append(supported_table)
+                            found = True
+                            break
+
+                    if not found:
+                        await self.message_manager.send_template(
+                            user=admin_user,
+                            template_key='admin/import/unknown_table',
+                            variables={'table': table},
+                            update=message
+                        )
+                        return
+
+                if valid_tables:
+                    tables_to_import = valid_tables
+
+        # Создаем бэкап если не dry режим
         backup_path = None
         if mode != 'dry':
-            backup_path = await self._create_backup()
-            logger.info(f"Created backup: {backup_path}")
+            try:
+                backup_path = await self._create_backup()
+                logger.info(f"Created backup: {backup_path}")
+            except Exception as e:
+                logger.error(f"Failed to create backup: {e}")
+                await self.message_manager.send_template(
+                    user=admin_user,
+                    template_key='admin/import/backup_error',
+                    variables={'error': str(e)},
+                    update=message
+                )
+                return
 
-        # Начинаем импорт
-        reply = await message.reply(
-            f"🔄 {'Проверка' if mode == 'dry' else 'Импорт'} таблиц: {', '.join(tables_to_import)}..."
+        # Отправляем начальное сообщение
+        await self.message_manager.send_template(
+            user=admin_user,
+            template_key='admin/sync/starting',
+            variables={
+                'mode': mode,
+                'tables': ', '.join(tables_to_import)
+            },
+            update=message
         )
 
         all_results = {}
-        total_updated = 0
-        total_added = 0
-        total_errors = 0
+        total_stats = {
+            'total': 0,
+            'updated': 0,
+            'added': 0,
+            'skipped': 0,
+            'errors': 0
+        }
 
         try:
-            with Session() as session:
+            with Session() as sync_session:
                 for table_name in tables_to_import:
                     try:
+                        # Импортируем таблицу (БЕЗ admin_lang!)
                         engine = UniversalSyncEngine(table_name)
-                        results = engine.import_from_sheets(session, dry_run=(mode == 'dry'))
+                        results = engine.import_from_sheets(
+                            sync_session,
+                            dry_run=(mode == 'dry')
+                        )
 
                         all_results[table_name] = results
-                        total_updated += results.get('updated', 0)
-                        total_added += results.get('added', 0)
-                        total_errors += len(results.get('errors', []))
+
+                        # Обновляем общую статистику
+                        total_stats['total'] += results.get('total', 0)
+                        total_stats['updated'] += results.get('updated', 0)
+                        total_stats['added'] += results.get('added', 0)
+                        total_stats['skipped'] += results.get('skipped', 0)
+                        total_stats['errors'] += len(results.get('errors', []))
 
                     except Exception as e:
                         logger.error(f"Failed to import {table_name}: {e}")
-                        all_results[table_name] = {'error': str(e)}
-                        total_errors += 1
+                        all_results[table_name] = {
+                            'error': str(e),
+                            'total': 0,
+                            'updated': 0,
+                            'added': 0,
+                            'skipped': 0,
+                            'errors': []
+                        }
+                        total_stats['errors'] += 1
 
         except Exception as e:
             logger.error(f"Critical import error: {e}")
-            await reply.edit_text(f"❌ Критическая ошибка: {str(e)}")
+            await self.message_manager.send_template(
+                user=admin_user,
+                template_key='admin/sync/critical_error',
+                variables={'error': str(e)},
+                update=message
+            )
             return
 
-        # Формируем отчет
-        report = self._format_import_report(all_results, mode, backup_path)
+        # Формируем детальный отчет
+        report = await self._format_detailed_import_report(
+            all_results,
+            mode,
+            backup_path,
+            admin_user.lang
+        )
 
-        # Отправляем отчет (если слишком длинный - разбиваем)
+        # Отправляем финальный отчет
         if len(report) > 4000:
             # Краткий отчет
-            short_report = (
-                f"{'✅' if total_errors == 0 else '⚠️'} "
-                f"{'Проверка' if mode == 'dry' else 'Импорт'} завершен\n\n"
-                f"Обновлено: {total_updated}\n"
-                f"Добавлено: {total_added}\n"
-                f"Ошибок: {total_errors}\n"
+            icon = '✅' if total_stats['errors'] == 0 else '⚠️'
+
+            await self.message_manager.send_template(
+                user=admin_user,
+                template_key=['admin/sync/report_header', 'admin/sync/report_summary'],
+                variables={
+                    'mode': mode,
+                    'icon': icon,
+                    'updated': total_stats['updated'],
+                    'added': total_stats['added'],
+                    'errors': total_stats['errors'],
+                    'backup_path': backup_path or ''
+                },
+                update=message
             )
-            if backup_path:
-                short_report += f"\n💾 Бэкап: {backup_path}"
 
-            await reply.edit_text(short_report)
-
-            # Детали в отдельных сообщениях
+            # Детальные отчеты по таблицам с ошибками как отдельные сообщения
             for table_name, results in all_results.items():
-                if results.get('errors'):
-                    errors_text = f"❌ Ошибки в {table_name}:\n"
-                    for err in results['errors'][:5]:
-                        errors_text += f"Строка {err['row']}: {err['error']}\n"
-                    await message.answer(errors_text)
+                if results.get('errors') or results.get('changes'):
+                    table_report = await self._format_table_report(
+                        table_name,
+                        results,
+                        mode,
+                        admin_user.lang
+                    )
+
+                    # Отправляем через message_manager с raw шаблоном
+                    await self.message_manager.send_template(
+                        user=admin_user,
+                        template_key='admin/sync/table_details_raw',
+                        variables={'content': table_report},
+                        update=message
+                    )
         else:
-            await reply.edit_text(report)
+            # Отправляем полный отчет
+            await self.message_manager.send_template(
+                user=admin_user,
+                template_key='admin/sync/full_report',
+                variables={'report': report},
+                update=message
+            )
+
+    async def _format_detailed_import_report(self, results: Dict, mode: str, backup_path: str, lang: str) -> str:
+        """Форматирует детальный отчет об импорте с использованием шаблонов"""
+
+        # Заголовок
+        header_key = 'admin/sync/report_header_check' if mode == 'dry' else 'admin/sync/report_header_import'
+        header, _ = await MessageTemplates.get_raw_template(header_key, {}, lang)
+
+        report = header + "\n" + "=" * 30 + "\n\n"
+
+        # По каждой таблице
+        for table_name, result in results.items():
+            # Заголовок таблицы
+            report += f"📋 {table_name}:\n"
+
+            if 'error' in result:
+                # Критическая ошибка таблицы
+                error_text, _ = await MessageTemplates.get_raw_template(
+                    'admin/sync/table_critical_error',
+                    {'error': result['error']},
+                    lang
+                )
+                report += f"  {error_text}\n\n"
+            else:
+                # Статистика
+                stats_text, _ = await MessageTemplates.get_raw_template(
+                    'admin/sync/table_stats',
+                    {
+                        'total': result.get('total', 0),
+                        'updated': result.get('updated', 0),
+                        'added': result.get('added', 0),
+                        'skipped': result.get('skipped', 0)
+                    },
+                    lang
+                )
+                report += stats_text + "\n"
+
+                # Предупреждения о балансах
+                warnings = result.get('warnings', [])
+                if warnings:
+                    warnings_header, _ = await MessageTemplates.get_raw_template(
+                        'admin/sync/warnings_header',
+                        {'count': len(warnings)},
+                        lang
+                    )
+                    report += f"  {warnings_header}\n"
+
+                    for warn in warnings[:5]:  # Первые 5 предупреждений
+                        report += f"    • Строка {warn.get('row', '?')}: {warn.get('warning', 'Balance mismatch')}\n"
+
+                # Ошибки
+                errors = result.get('errors', [])
+                if errors:
+                    errors_header, _ = await MessageTemplates.get_raw_template(
+                        'admin/sync/errors_header',
+                        {'count': len(errors)},
+                        lang
+                    )
+                    report += f"  {errors_header}\n"
+
+                    for err in errors[:5]:  # Первые 5 ошибок
+                        report += f"    • Строка {err.get('row', '?')}: {err.get('error', 'Unknown error')}\n"
+
+                # Изменения (только первые 5)
+                changes = result.get('changes', [])
+                if changes and mode == 'dry':
+                    changes_header, _ = await MessageTemplates.get_raw_template(
+                        'admin/sync/changes_header',
+                        {'count': min(5, len(changes))},
+                        lang
+                    )
+                    report += f"  {changes_header}\n"
+
+                    for change in changes[:5]:
+                        action_text, _ = await MessageTemplates.get_raw_template(
+                            'admin/sync/change_action_update' if change.get(
+                                'action') == 'update' else 'admin/sync/change_action_add',
+                            {},
+                            lang
+                        )
+                        report += f"    • ID {change.get('id', '?')}: {action_text}\n"
+
+                        if change.get('action') == 'update':
+                            for field_change in change.get('fields', []):
+                                field = field_change.get('field')
+                                old = field_change.get('old', '')
+                                new = field_change.get('new', '')
+                                report += f"      {field}: {old} → {new}\n"
+
+            report += "\n"
+
+        if backup_path:
+            backup_text, _ = await MessageTemplates.get_raw_template(
+                'admin/sync/backup_created',
+                {'path': backup_path},
+                lang
+            )
+            report += backup_text
+
+        return report
 
     async def _create_backup(self) -> str:
         """Создает бэкап БД перед импортом"""
@@ -323,48 +470,7 @@ class AdminCommands:
         logger.info(f"Created backup: {backup_path}")
         return backup_path
 
-    def _format_import_report(self, results: Dict, mode: str, backup_path: str = None) -> str:
-        """Форматирует отчет об импорте"""
-        is_dry = mode == 'dry'
-
-        report = f"📊 {'Отчет проверки' if is_dry else 'Отчет импорта'}\n"
-        report += "=" * 30 + "\n\n"
-
-        for table_name, result in results.items():
-            if 'error' in result:
-                report += f"❌ {table_name}: {result['error']}\n\n"
-                continue
-
-            report += f"📋 {table_name}:\n"
-            report += f"  Всего строк: {result.get('total', 0)}\n"
-            report += f"  Обновлено: {result.get('updated', 0)}\n"
-            report += f"  Добавлено: {result.get('added', 0)}\n"
-            report += f"  Пропущено: {result.get('skipped', 0)}\n"
-
-            errors = result.get('errors', [])
-            if errors:
-                report += f"  ⚠️ Ошибок: {len(errors)}\n"
-                for err in errors[:3]:  # Показываем первые 3 ошибки
-                    report += f"    • Строка {err['row']}: {err['error']}\n"
-
-            # Показываем изменения в dry run
-            if is_dry and result.get('changes'):
-                report += f"  📝 Изменения (первые 5):\n"
-                for change in result['changes'][:5]:
-                    if change['action'] == 'update':
-                        report += f"    • ID {change['id']}: обновление\n"
-                        for field in change.get('fields', [])[:2]:
-                            report += f"      {field['field']}: {field['old']} → {field['new']}\n"
-                    elif change['action'] == 'add':
-                        report += f"    • ID {change['id']}: новая запись\n"
-
-            report += "\n"
-
-        if not is_dry and backup_path:
-            report += f"💾 Бэкап сохранен: {backup_path}\n"
-            report += f"Для отката: &restore {os.path.basename(backup_path)}\n"
-
-        return report
+    # СТАРЫЙ МЕТОД _format_import_report УДАЛЕН!
 
     async def handle_upconfig(self, message: types.Message):
         """Обработчик команды &upconfig для обновления конфигурации из Google Sheets"""
@@ -494,7 +600,7 @@ class AdminCommands:
 
             # Build status report using modular templates
             template_keys = ['admin/testmail/header']
-            working_providers=[]
+            working_providers = []
 
             for provider_name, is_working in providers_status.items():
                 if provider_name == 'smtp':
@@ -690,7 +796,17 @@ class AdminCommands:
                 await self.message_manager.send_template(
                     user=admin_user,
                     template_key=error_templates,
-                    variables={...},
+                    variables={
+                        'smtp_host': config.SMTP_HOST,
+                        'smtp_port': config.SMTP_PORT,
+                        'smtp_status': '✅ OK' if providers_status.get('smtp', False) else '❌ FAIL',
+                        'mailgun_domain': config.MAILGUN_DOMAIN,
+                        'mailgun_region': config.MAILGUN_REGION,
+                        'mailgun_status': '✅ OK' if providers_status.get('mailgun', False) else '❌ FAIL',
+                        'domains': ', '.join(email_manager.secure_domains) if email_manager.secure_domains else '',
+                        'target_email': target_email,
+                        'provider': selected_provider.upper()
+                    },
                     update=reply,
                     edit=True
                 )
@@ -747,7 +863,7 @@ class AdminCommands:
                     f"📊 Purchase Analysis:\n\n"
                     f"🆔 Purchase ID: {purchase_id}\n"
                     f"👤 User: {user_name} (ID: {purchase.userID})\n"
-                    f"📊 Project: {purchase.projectName} (ID: {purchase.projectID})\n"
+                    f"📦 Project: {purchase.projectName} (ID: {purchase.projectID})\n"
                     f"🎯 Quantity: {purchase.packQty} shares\n"
                     f"💰 Price: ${purchase.packPrice:.2f}\n"
                     f"🔧 Option: {purchase.optionID}\n"
