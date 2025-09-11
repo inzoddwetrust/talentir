@@ -1,7 +1,7 @@
 """
 Webhook handler для экспорта данных из БД в Google Sheets
 Принимает запросы от Google Apps Script и возвращает JSON с данными
-Версия с улучшенной безопасностью
+Версия с улучшенной безопасностью и исправленной проверкой подписи
 """
 
 import logging
@@ -231,15 +231,26 @@ class WebhookHandler:
 
         return False
 
-    def verify_signature(self, payload: bytes, signature: str) -> bool:
-        """Проверка подписи запроса"""
+    def verify_signature(self, data_dict: Dict, signature: str) -> bool:
+        """
+        Проверка подписи запроса
+        ИСПРАВЛЕНО: Теперь проверяет подпись от данных БЕЗ самой подписи
+        """
         if not signature:
             logger.warning("No signature provided in request")
             return False
 
+        # Создаем копию данных без подписи
+        data_for_verification = data_dict.copy()
+        data_for_verification.pop('signature', None)
+
+        # Сортируем ключи для консистентности
+        payload_json = json.dumps(data_for_verification, sort_keys=True, separators=(',', ':'))
+
+        # Генерируем ожидаемую подпись
         expected = hmac.new(
-            self.secret_key.encode(),
-            payload,
+            self.secret_key.encode('utf-8'),
+            payload_json.encode('utf-8'),
             hashlib.sha256
         ).hexdigest()
 
@@ -248,6 +259,8 @@ class WebhookHandler:
 
         if not is_valid:
             logger.warning(f"Invalid signature. Expected: {expected[:10]}..., Got: {signature[:10]}...")
+            # Для отладки (потом удалить)
+            logger.debug(f"Payload for verification: {payload_json[:100]}...")
 
         return is_valid
 
@@ -299,7 +312,7 @@ class WebhookHandler:
             'status': 'ok',
             'timestamp': datetime.now().isoformat(),
             'service': 'talentir-sync-webhook',
-            'version': '2.0.0'  # Security-enhanced version
+            'version': '2.1.0'  # Updated version with fixed signature
         })
 
     async def handle_metrics(self, request: web.Request) -> web.Response:
@@ -375,9 +388,9 @@ class WebhookHandler:
                         status=400
                     )
 
-            # Verify signature
+            # ИСПРАВЛЕНО: Проверяем подпись от данных БЕЗ самой подписи
             signature = data.get('signature', '')
-            if not self.verify_signature(body, signature):
+            if not self.verify_signature(data, signature):
                 logger.warning(f"Invalid signature from {client_ip} for table {data.get('table', 'unknown')}")
                 await self.notify_security_event(
                     f"Invalid webhook signature from {client_ip}\n"
