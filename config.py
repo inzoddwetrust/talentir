@@ -179,3 +179,16 @@ SECURE_EMAIL_DOMAINS = "@t-online.de, @gmx.de, @web.de"
 
 WEBHOOK_PORT = int(os.getenv("WEBHOOK_PORT", "8080"))
 WEBHOOK_SECRET_KEY = os.getenv("WEBHOOK_SECRET_KEY", "error")
+WEBHOOK_HOST = os.getenv("WEBHOOK_HOST", "127.0.0.1")
+
+# Проверка критически важного ключа
+if not WEBHOOK_SECRET_KEY or WEBHOOK_SECRET_KEY == "error":
+    print("⚠️ WARNING: WEBHOOK_SECRET_KEY not configured! Webhook will not start.")
+
+# Дополнительная безопасность
+WEBHOOK_HEALTH_TOKEN = os.getenv("WEBHOOK_HEALTH_TOKEN")
+WEBHOOK_RATE_LIMIT_REQUESTS = int(os.getenv("WEBHOOK_RATE_LIMIT_REQUESTS", "30"))
+WEBHOOK_RATE_LIMIT_WINDOW = int(os.getenv("WEBHOOK_RATE_LIMIT_WINDOW", "60"))
+
+# Дополнительные разрешенные IP (помимо Google Cloud)
+WEBHOOK_ALLOWED_IPS = os.getenv("WEBHOOK_ALLOWED_IPS", "").split(",") if os.getenv("WEBHOOK_ALLOWED_IPS") else []
