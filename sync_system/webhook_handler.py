@@ -383,8 +383,28 @@ class WebhookHandler:
             # Check timestamp (prevent replay attacks)
             if 'timestamp' in data:
                 try:
-                    request_time = datetime.fromisoformat(data['timestamp'].replace('Z', '+00:00'))
-                    time_diff = abs((datetime.now() - request_time).total_seconds())
+                    from datetime import timezone
+
+                    # Parse timestamp with proper timezone handling
+                    timestamp_str = data['timestamp']
+
+                    # Handle different timestamp formats
+                    if timestamp_str.endswith('Z'):
+                        # ISO format with Z (UTC)
+                        request_time = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                    elif '+' in timestamp_str or timestamp_str.endswith('+00:00'):
+                        # Already has timezone
+                        request_time = datetime.fromisoformat(timestamp_str)
+                    else:
+                        # No timezone info, assume UTC
+                        request_time = datetime.fromisoformat(timestamp_str)
+                        if request_time.tzinfo is None:
+                            request_time = request_time.replace(tzinfo=timezone.utc)
+
+                    # Compare with current UTC time
+                    current_time = datetime.now(timezone.utc)
+                    time_diff = abs((current_time - request_time).total_seconds())
+
                     if time_diff > 300:  # 5 minutes tolerance
                         logger.warning(f"Request timestamp too old from {client_ip}: {time_diff} seconds")
                         return web.json_response(
@@ -398,7 +418,7 @@ class WebhookHandler:
                         status=400
                     )
 
-            # ИСПРАВЛЕНО: Проверяем подпись от данных БЕЗ самой подписи
+            # Verify signature
             signature = data.get('signature', '')
             if not self.verify_signature(data, signature):
                 logger.warning(f"Invalid signature from {client_ip} for table {data.get('table', 'unknown')}")
