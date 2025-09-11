@@ -470,7 +470,74 @@ class AdminCommands:
         logger.info(f"Created backup: {backup_path}")
         return backup_path
 
-    # СТАРЫЙ МЕТОД _format_import_report УДАЛЕН!
+    async def handle_object(self, message: types.Message):
+        """Отправляет медиа-объект по его file_id"""
+        try:
+            # Парсим команду
+            parts = message.text.strip().split(maxsplit=1)
+
+            if len(parts) != 2:
+                await message.reply(
+                    "❌ Неверный формат команды!\n\n"
+                    "Использование: &object {file_id}\n\n"
+                    "Пример: &object AgACAgIAAxkBAAIhhGgQ228dxkaJG1zUfh61OfzelNVRAAI88DEb-CGJSI454TV0wQSVAQADAgADeQADNgQ"
+                )
+                return
+
+            file_id = parts[1].strip()
+
+            # Логируем для отладки
+            logger.info(f"Attempting to send object with file_id: {file_id}")
+
+            # Пытаемся отправить как разные типы медиа
+            # Порядок важен - начинаем с наиболее специфичных типов
+
+            send_attempts = [
+                ('sticker', lambda: message.reply_sticker(sticker=file_id)),
+                ('photo', lambda: message.reply_photo(photo=file_id, caption="📷 Photo object")),
+                ('video', lambda: message.reply_video(video=file_id, caption="🎥 Video object")),
+                ('document', lambda: message.reply_document(document=file_id, caption="📄 Document object")),
+                ('animation', lambda: message.reply_animation(animation=file_id, caption="🎬 Animation object")),
+                ('audio', lambda: message.reply_audio(audio=file_id, caption="🎵 Audio object")),
+                ('voice', lambda: message.reply_voice(voice=file_id, caption="🎤 Voice object")),
+                ('video_note', lambda: message.reply_video_note(video_note=file_id))
+            ]
+
+            errors = []
+
+            for media_type, send_func in send_attempts:
+                try:
+                    await send_func()
+                    # Если успешно отправлено, сообщаем тип и выходим
+                    await message.reply(f"✅ Объект успешно отправлен как: **{media_type}**", parse_mode="Markdown")
+                    logger.info(f"Successfully sent object as {media_type}")
+                    return
+                except Exception as e:
+                    error_text = str(e)
+                    # Сохраняем только уникальные ошибки
+                    if not any(error_text in err for err in errors):
+                        errors.append(f"{media_type}: {error_text}")
+                    continue
+
+            # Если ничего не сработало
+            error_report = "❌ Не удалось отправить объект!\n\n"
+            error_report += "Возможные причины:\n"
+            error_report += "• File_id недействителен или устарел\n"
+            error_report += "• Объект из другого бота\n"
+            error_report += "• Объект был удален из Telegram\n\n"
+
+            if errors:
+                error_report += "Детали ошибок:\n"
+                for err in errors[:3]:  # Показываем первые 3 ошибки
+                    error_report += f"• {err}\n"
+
+            await message.reply(error_report)
+            logger.error(f"Failed to send object {file_id}: all attempts failed")
+
+        except Exception as e:
+            error_msg = f"❌ Критическая ошибка: {str(e)}"
+            await message.reply(error_msg)
+            logger.error(f"Error in handle_object: {e}", exc_info=True)
 
     async def handle_upconfig(self, message: types.Message):
         """Обработчик команды &upconfig для обновления конфигурации из Google Sheets"""
@@ -1069,6 +1136,9 @@ class AdminCommands:
 
         elif command == "restore":
             await self.handle_restore(message)
+
+        elif command == "object":
+            await self.handle_object(message)
 
         elif command == "upconfig":
             await self.handle_upconfig(message)
