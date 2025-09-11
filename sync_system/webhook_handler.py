@@ -195,17 +195,27 @@ class WebhookHandler:
 
     def get_client_ip(self, request: web.Request) -> str:
         """Get real client IP from request"""
+        # Добавьте отладку
+        logger.info(
+            f"Headers: X-Forwarded-For={request.headers.get('X-Forwarded-For')}, X-Real-IP={request.headers.get('X-Real-IP')}")
+
         # Check for proxy headers
         if 'X-Forwarded-For' in request.headers:
             # Take the first IP from the chain
-            return request.headers['X-Forwarded-For'].split(',')[0].strip()
+            ip = request.headers['X-Forwarded-For'].split(',')[0].strip()
+            logger.info(f"Using X-Forwarded-For: {ip}")
+            return ip
         elif 'X-Real-IP' in request.headers:
-            return request.headers['X-Real-IP']
+            ip = request.headers['X-Real-IP']
+            logger.info(f"Using X-Real-IP: {ip}")
+            return ip
         else:
             # Fallback to remote address
             peername = request.transport.get_extra_info('peername')
             if peername:
-                return peername[0]
+                ip = peername[0]
+                logger.info(f"Using peername: {ip}")
+                return ip
             return 'unknown'
 
     def is_ip_allowed(self, client_ip: str) -> bool:
