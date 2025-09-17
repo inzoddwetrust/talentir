@@ -63,25 +63,26 @@ async def verify_transaction(txid: str, method: str, expected_address: str) -> V
     Checks recipient address and returns transaction details.
     """
     try:
+        logging.info(f"Starting verification for txid: {txid}, method: {method}")
+
         if method in ["ETH", "USDT-ERC20"]:
+            logging.info("Calling _verify_eth_transaction")
             result = await _verify_eth_transaction(txid)
         elif method in ["BNB", "USDT-BSC20"]:
+            logging.info("Calling _verify_bsc_transaction")
             result = await _verify_bsc_transaction(txid)
         elif method in ["TRX", "USDT-TRC20"]:
+            logging.info("Calling _verify_tron_transaction")
             result = await _verify_tron_transaction(txid)
         else:
             return ValidationResult(TxidValidationCode.UNSUPPORTED_METHOD)
+
+        logging.info(f"Verification result: {result}")
 
         if result is None:
             return ValidationResult(TxidValidationCode.TRANSACTION_NOT_FOUND)
 
         from_addr, to_addr = result
-        # if to_addr.lower() != expected_address.lower():
-        #     return ValidationResult(
-        #         TxidValidationCode.WRONG_RECIPIENT,
-        #         from_address=from_addr,
-        #         to_address=to_addr
-        #     )
 
         return ValidationResult(
             TxidValidationCode.VALID_TRANSACTION,
@@ -90,7 +91,7 @@ async def verify_transaction(txid: str, method: str, expected_address: str) -> V
         )
 
     except Exception as e:
-        logging.error(f"Error verifying transaction {txid}: {e}")
+        logging.error(f"Error verifying transaction {txid}: {e}", exc_info=True)
         return ValidationResult(TxidValidationCode.API_ERROR, details=str(e))
 
 
@@ -107,9 +108,24 @@ async def _verify_eth_transaction(txid: str) -> Optional[Tuple[str, str]]:
     async with aiohttp.ClientSession() as session:
         async with session.get(url, params=params) as response:
             if response.status == 200:
-                data = await response.json()
-                if data.get("result"):
-                    return data["result"]["from"], data["result"]["to"]
+                try:
+                    data = await response.json()
+                    result = data.get("result")
+
+                    if result and isinstance(result, dict):
+                        from_address = result.get("from")
+                        to_address = result.get("to")
+
+                        if from_address and to_address:
+                            return from_address, to_address
+
+                    elif result is None or result == "null":
+                        logging.info(f"Transaction not found: {txid}")
+                        return None
+
+                except Exception as e:
+                    logging.error(f"Error parsing ETH response: {e}")
+
     return None
 
 
@@ -126,16 +142,28 @@ async def _verify_bsc_transaction(txid: str) -> Optional[Tuple[str, str]]:
     async with aiohttp.ClientSession() as session:
         async with session.get(url, params=params) as response:
             if response.status == 200:
-                data = await response.json()
-                if data.get("result") and data["result"] is not None:
-                    # Check if transaction exists (result is not None)
-                    tx_data = data["result"]
-                    # Extract from and to addresses
-                    from_address = tx_data.get("from")
-                    to_address = tx_data.get("to")
+                try:
+                    data = await response.json()
 
-                    if from_address and to_address:
-                        return from_address, to_address
+                    # Проверяем результат
+                    result = data.get("result")
+
+                    # Если result это словарь с данными транзакции
+                    if result and isinstance(result, dict):
+                        from_address = result.get("from")
+                        to_address = result.get("to")
+
+                        if from_address and to_address:
+                            return from_address, to_address
+
+                    # Если result NULL или None (транзакция не найдена)
+                    elif result is None or result == "null":
+                        logging.info(f"Transaction not found: {txid}")
+                        return None
+
+                except Exception as e:
+                    logging.error(f"Error parsing BSC response: {e}")
+
     return None
 
 
