@@ -127,9 +127,12 @@ async def show_welcome_screen(user, message_or_callback, session):
     users_count = await GlobalVariables().get('usersCount')
     purchases_total = await GlobalVariables().get('purchasesTotal')
 
+    # НОВОЕ: Получаем список шаблонов для дашборда
+    template_keys = await get_dashboard_template_keys(user)
+
     await message_manager.send_template(
         user=user,
-        template_key='/dashboard/existingUser',
+        template_key=template_keys,  # ИЗМЕНЕНО: передаем список вместо '/dashboard/existingUser'
         update=message_or_callback,
         variables={
             'firstname': user.firstname,
@@ -142,7 +145,8 @@ async def show_welcome_screen(user, message_or_callback, session):
             'purchasesTotal': purchases_total,
             'userPurchasesTotal': user_purchases_total,
             'uplineCount': upline_count,
-            'uplineTotal': upline_total
+            'uplineTotal': upline_total,
+            'email': user.email  # ДОБАВЛЕНО: для шаблона settings_filled_unconfirmed
         }
     )
 
@@ -447,6 +451,16 @@ async def send_welcome(message: types.Message, state: FSMContext):
 
         await show_welcome_screen(user, message, session)
 
+async def get_dashboard_template_keys(user: User) -> list:
+    """Возвращает список ключей шаблонов для экрана дашборда на основе данных пользователя"""
+    template_keys = ['/dashboard/existingUser']
+
+    if not user.isFilled:
+        template_keys.append('settings_unfilled_data')
+    elif user.isFilled and not helpers.is_email_confirmed(user):
+        template_keys.append('settings_filled_unconfirmed')
+
+    return template_keys
 
 @dp.callback_query_handler(lambda c: c.data == "/check/subscription", state="*")
 @with_user
