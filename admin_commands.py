@@ -1173,96 +1173,51 @@ class AdminCommands:
             await self.handle_testmail(message)
 
         elif command == "legacy":
-            # Legacy миграция
-            try:
-                reply = await message.reply("🔄 Проверяю legacy миграцию...")
 
+            try:
+                reply = await message.reply("🔄 Запускаю legacy миграцию...")
                 from legacy_user_processor import legacy_processor
+                try:
+                    # This will raise RuntimeError if migration is already running
+                    stats = await legacy_processor._process_legacy_users()
 
-                stats = await legacy_processor._process_legacy_users()
+                    # Build detailed report
+                    report = f"📊 Legacy Migration Report:\n\n"
+                    report += f"📋 Total records: {stats.total_records}\n"
+                    report += f"👤 Users found: {stats.users_found}\n"
+                    report += f"👥 Upliners assigned: {stats.upliners_assigned}\n"
+                    report += f"📈 Purchases created: {stats.purchases_created}\n"
+                    report += f"✅ Completed: {stats.completed}\n"
+                    report += f"❌ Errors: {stats.errors}\n"
 
-                report = f"📊 Legacy Migration Report:\n\n"
-                report += f"📋 Total records: {stats.total_records}\n"
-                report += f"👤 Users found: {stats.users_found}\n"
-                report += f"👥 Upliners assigned: {stats.upliners_assigned}\n"
-                report += f"📈 Purchases created: {stats.purchases_created}\n"
-                report += f"✅ Completed: {stats.completed}\n"
-                report += f"❌ Errors: {stats.errors}\n"
-
-                if stats.users_found == 0 and stats.upliners_assigned == 0 and stats.purchases_created == 0:
-                    report += "\n🔍 No new legacy users found to process."
-                else:
-                    report += "\n🎯 Legacy migration processing completed!"
-
-                await reply.edit_text(report)
-
-            except Exception as e:
-                error_msg = f"❌ Ошибка при проверке legacy миграции: {str(e)}"
-                logger.error(error_msg, exc_info=True)
-                await message.reply(error_msg)
-
-        elif command == "check":
-            # Проверка платежей
-            try:
-                reply = await message.reply("🔍 Проверяю платежи...")
-
-                with Session() as session:
-                    pending_payments = session.query(Payment).filter_by(status="check").all()
-                    total_amount = session.query(func.sum(Payment.amount)).filter_by(status="check").scalar() or 0
-
-                    if pending_payments:
-                        report = f"💰 В системе ожидает проверки {len(pending_payments)} платежей на сумму ${total_amount:.2f}"
-
-                        # Удаляем старые уведомления
-                        for payment in pending_payments:
-                            existing_notifications = (
-                                session.query(Notification)
-                                .filter(
-                                    Notification.source == "payment_checker",
-                                    Notification.text.like(f"%payment_id: {payment.paymentID}%")
-                                )
-                                .all()
-                            )
-                            for notif in existing_notifications:
-                                session.delete(notif)
-
-                        session.commit()
-
-                        # Создаем новые уведомления
-                        notifications_created = 0
-                        for payment in pending_payments:
-                            payer = session.query(User).filter_by(userID=payment.userID).first()
-                            if not payer:
-                                continue
-
-                            try:
-                                from main import create_payment_check_notification
-                                await create_payment_check_notification(payment, payer)
-                                notifications_created += 1
-                            except Exception as e:
-                                logger.error(f"Error creating notification for payment {payment.paymentID}: {e}")
-
-                        report += f"\n✅ Создано {notifications_created} новых уведомлений для администраторов"
-                        await reply.edit_text(report)
+                    # Add summary based on results
+                    if stats.users_found == 0 and stats.upliners_assigned == 0 and stats.purchases_created == 0:
+                        report += "\n🔍 No new legacy users found to process."
                     else:
-                        await reply.edit_text("✅ Непроверенных платежей нет")
+                        report += "\n🎯 Legacy migration processing completed!"
 
+                    # Add error details if any
+                    if stats.errors > 0 and stats.error_details:
+                        report += "\n\n⚠️ Error details (first 10):\n"
+                        for email, error in stats.error_details[:10]:
+                            report += f"• {email}: {error}\n"
+                    await reply.edit_text(report)
+
+
+                except RuntimeError as e:
+                    if "already in progress" in str(e):
+                        await reply.edit_text(
+                            "⚠️ Автоматическая миграция идёт прямо сейчас.\n"
+                            "Читайте логи для отслеживания прогресса.\n\n"
+                            "Миграция запускается автоматически каждые 10 минут."
+                        )
+
+                    else:
+                        raise
             except Exception as e:
-                error_msg = f"❌ Ошибка при проверке платежей: {str(e)}"
+                error_msg = f"❌ Ошибка при legacy миграции: {str(e)}"
                 logger.error(error_msg, exc_info=True)
                 await message.reply(error_msg)
-
-        else:
-            with Session() as session:
-                admin_user = session.query(User).filter_by(telegramID=message.from_user.id).first()
-            await self.message_manager.send_template(
-                user=admin_user,
-                template_key='admin/commands/help',
-                variables={
-                    'unknown_command': command
-                },
-                update=message
-            )
 
 
 def setup_admin_commands(dp, message_manager):

@@ -65,13 +65,19 @@ async def verify_transaction(txid: str, method: str, expected_address: str) -> V
     """
     try:
         logging.info(f"Starting verification for txid: {txid}, method: {method}")
+        logging.info(f"Expected recipient address: {expected_address}")
 
-        if method in ["ETH", "USDT-ERC20"]:
-            result = await _verify_evm_transaction_v2(txid, chain_id=1)  # Ethereum mainnet
-        elif method in ["BNB", "USDT-BSC20"]:
-            result = await _verify_evm_transaction_v2(txid, chain_id=56)  # BSC mainnet
+        # Route to appropriate verifier based on method
+        if method == "ETH":
+            result = await _verify_native_evm_transaction(txid, chain_id=1)
+        elif method == "BNB":
+            result = await _verify_native_evm_transaction(txid, chain_id=56)
+        elif method == "USDT-ERC20":
+            result = await _verify_erc20_token_transaction(txid, chain_id=1)
+        elif method == "USDT-BSC20":
+            result = await _verify_erc20_token_transaction(txid, chain_id=56)
         elif method in ["TRX", "USDT-TRC20"]:
-            result = await _verify_tron_transaction(txid)  # TRON не EVM, оставляем старый API
+            result = await _verify_tron_transaction(txid)
         else:
             return ValidationResult(TxidValidationCode.UNSUPPORTED_METHOD)
 
@@ -81,6 +87,15 @@ async def verify_transaction(txid: str, method: str, expected_address: str) -> V
             return ValidationResult(TxidValidationCode.TRANSACTION_NOT_FOUND)
 
         from_addr, to_addr = result
+
+        # Check recipient address
+        if to_addr.lower() != expected_address.lower():
+            logging.warning(f"Wrong recipient! Expected: {expected_address}, Got: {to_addr}")
+            return ValidationResult(
+                TxidValidationCode.WRONG_RECIPIENT,
+                from_address=from_addr,
+                to_address=to_addr
+            )
 
         return ValidationResult(
             TxidValidationCode.VALID_TRANSACTION,
@@ -93,72 +108,131 @@ async def verify_transaction(txid: str, method: str, expected_address: str) -> V
         return ValidationResult(TxidValidationCode.API_ERROR, details=str(e))
 
 
-async def _verify_evm_transaction_v2(txid: str, chain_id: int) -> Optional[Tuple[str, str]]:
+async def _verify_native_evm_transaction(txid: str, chain_id: int) -> Optional[Tuple[str, str]]:
     """
-    Universal EVM transaction verifier using Etherscan API V2.
-    Works for ETH, BSC, and other EVM chains.
-
-    Chain IDs:
-    - Ethereum: 1
-    - BSC: 56
+    Verifies native coin transactions (ETH, BNB) using Etherscan API V2.
+    For native coins, we check the 'to' field directly.
     """
     url = "https://api.etherscan.io/v2/api"
 
-    # Using JSON-RPC method through V2 API
     params = {
         "chainid": chain_id,
         "module": "proxy",
         "action": "eth_getTransactionByHash",
         "txhash": txid,
-        "apikey": config.ETHERSCAN_API_KEY  # V2 uses single API key for all chains
+        "apikey": config.ETHERSCAN_API_KEY
     }
 
-    logging.info(f"V2 API request - Chain: {chain_id}, TXID: {txid}")
+    logging.info(f"V2 API request for native coin - Chain: {chain_id}, TXID: {txid}")
 
     async with aiohttp.ClientSession() as session:
         async with session.get(url, params=params) as response:
-            logging.info(f"V2 API response status: {response.status}")
-
             if response.status == 200:
                 try:
                     data = await response.json()
-                    logging.info(f"V2 API response structure: {data.keys() if isinstance(data, dict) else type(data)}")
 
-                    # Check for API errors
                     if data.get("status") == "0":
-                        error_message = data.get("message", "Unknown error")
-                        logging.error(f"V2 API error: {error_message}")
-
-                        # Check for specific error messages
-                        if "Invalid API Key" in error_message:
-                            logging.error("API Key issue - check ETHERSCAN_API_KEY in .env")
-                        elif "chain not supported" in error_message:
-                            logging.error(f"Chain {chain_id} not supported by this API key")
-
+                        logging.error(f"V2 API error: {data.get('message')}")
                         return None
 
-                    # Get transaction data from result
                     result = data.get("result")
 
                     if result and isinstance(result, dict):
                         from_address = result.get("from")
                         to_address = result.get("to")
 
-                        logging.info(f"V2 transaction found - from: {from_address}, to: {to_address}")
+                        logging.info(f"Native transaction - from: {from_address}, to: {to_address}")
 
                         if from_address and to_address:
                             return from_address, to_address
-                    elif result is None or result == "null":
-                        logging.info(f"Transaction not found: {txid}")
-                        return None
-                    else:
-                        logging.warning(f"Unexpected result format: {type(result)}, value: {result}")
 
                 except Exception as e:
                     logging.error(f"Error parsing V2 API response: {e}", exc_info=True)
-            else:
-                text = await response.text()
-                logging.error(f"Non-200 response from V2 API: {response.status}, body: {text[:500]}")
+
+    return None
+
+
+async def _verify_erc20_token_transaction(txid: str, chain_id: int) -> Optional[Tuple[str, str]]:
+    """
+    Verifies ERC20/BEP20 token transactions (USDT) using Etherscan API V2.
+    For tokens, we need to decode the input data or use transaction receipt logs.
+    """
+    url = "https://api.etherscan.io/v2/api"
+
+    # First, get transaction receipt to access logs
+    params = {
+        "chainid": chain_id,
+        "module": "proxy",
+        "action": "eth_getTransactionReceipt",
+        "txhash": txid,
+        "apikey": config.ETHERSCAN_API_KEY
+    }
+
+    logging.info(f"V2 API request for token transfer - Chain: {chain_id}, TXID: {txid}")
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, params=params) as response:
+            if response.status == 200:
+                try:
+                    data = await response.json()
+
+                    if data.get("status") == "0":
+                        logging.error(f"V2 API error: {data.get('message')}")
+                        return None
+
+                    result = data.get("result")
+
+                    if result and isinstance(result, dict):
+                        from_address = result.get("from")
+                        logs = result.get("logs", [])
+
+                        # Look for Transfer event in logs
+                        # Transfer event signature: 0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef
+                        transfer_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+
+                        for log in logs:
+                            topics = log.get("topics", [])
+                            if len(topics) >= 3 and topics[0] == transfer_topic:
+                                # topics[1] = from (padded to 32 bytes)
+                                # topics[2] = to (padded to 32 bytes)
+                                # Extract addresses from topics (remove 0x prefix and padding)
+                                to_address = "0x" + topics[2][-40:]  # Last 40 chars are the address
+
+                                logging.info(f"Token transfer - from: {from_address}, to: {to_address}")
+                                return from_address, to_address
+
+                        # Alternative: Try to decode input data
+                        # Get the transaction details
+                        tx_params = {
+                            "chainid": chain_id,
+                            "module": "proxy",
+                            "action": "eth_getTransactionByHash",
+                            "txhash": txid,
+                            "apikey": config.ETHERSCAN_API_KEY
+                        }
+
+                        async with session.get(url, params=tx_params) as tx_response:
+                            if tx_response.status == 200:
+                                tx_data = await tx_response.json()
+                                tx_result = tx_data.get("result", {})
+
+                                if tx_result and isinstance(tx_result, dict):
+                                    input_data = tx_result.get("input", "")
+
+                                    # Check if it's a transfer function (0xa9059cbb)
+                                    if input_data.startswith("0xa9059cbb"):
+                                        # Extract recipient address from input data
+                                        # Format: 0xa9059cbb + 32 bytes address + 32 bytes amount
+                                        if len(input_data) >= 138:  # 10 + 64 + 64
+                                            # Extract recipient (skip method id and padding)
+                                            to_address = "0x" + input_data[34:74]
+
+                                            logging.info(
+                                                f"Token transfer from input - from: {from_address}, to: {to_address}")
+                                            return from_address, to_address
+
+                except Exception as e:
+                    logging.error(f"Error parsing token transaction: {e}", exc_info=True)
 
     return None
 
@@ -177,17 +251,18 @@ async def _verify_tron_transaction(txid: str) -> Optional[Tuple[str, str]]:
         async with session.get(url, params=params) as response:
             if response.status == 200:
                 try:
-                    # First try to get response as text to log it
                     text = await response.text()
                     logging.info(f"TRON API raw response: {text[:500]}")
 
-                    # Parse JSON
                     data = json.loads(text)
 
                     if isinstance(data, dict):
                         # TRX transfer
                         if data.get("contractType") == 1:
-                            return data.get("ownerAddress"), data.get("toAddress")
+                            from_addr = data.get("ownerAddress")
+                            to_addr = data.get("toAddress")
+                            if from_addr and to_addr:
+                                return from_addr, to_addr
 
                         # TRC20 transfer
                         elif data.get("contractType") == 31:
@@ -195,9 +270,10 @@ async def _verify_tron_transaction(txid: str) -> Optional[Tuple[str, str]]:
                                 transfers = data["trc20TransferInfo"]
                                 if transfers and isinstance(transfers, list):
                                     transfer = transfers[0]
-                                    return transfer.get("from_address"), transfer.get("to_address")
-                    else:
-                        logging.error(f"TRON API returned non-dict: {type(data)}")
+                                    from_addr = transfer.get("from_address")
+                                    to_addr = transfer.get("to_address")
+                                    if from_addr and to_addr:
+                                        return from_addr, to_addr
 
                 except Exception as e:
                     logging.error(f"Error parsing TRON response: {e}", exc_info=True)
