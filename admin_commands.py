@@ -1172,6 +1172,57 @@ class AdminCommands:
         elif command == "testmail":
             await self.handle_testmail(message)
 
+        elif command == "check":
+            # Проверка платежей
+            try:
+                reply = await message.reply("🔍 Проверяю платежи...")
+
+                with Session() as session:
+                    pending_payments = session.query(Payment).filter_by(status="check").all()
+                    total_amount = session.query(func.sum(Payment.amount)).filter_by(status="check").scalar() or 0
+
+                    if pending_payments:
+                        report = f"💰 В системе ожидает проверки {len(pending_payments)} платежей на сумму ${total_amount:.2f}"
+
+                        # Удаляем старые уведомления
+                        for payment in pending_payments:
+                            existing_notifications = (
+                                session.query(Notification)
+                                .filter(
+                                    Notification.source == "payment_checker",
+                                    Notification.text.like(f"%payment_id: {payment.paymentID}%")
+                                )
+                                .all()
+                            )
+                            for notif in existing_notifications:
+                                session.delete(notif)
+
+                        session.commit()
+
+                        # Создаем новые уведомления
+                        notifications_created = 0
+                        for payment in pending_payments:
+                            payer = session.query(User).filter_by(userID=payment.userID).first()
+                            if not payer:
+                                continue
+
+                            try:
+                                from main import create_payment_check_notification
+                                await create_payment_check_notification(payment, payer)
+                                notifications_created += 1
+                            except Exception as e:
+                                logger.error(f"Error creating notification for payment {payment.paymentID}: {e}")
+
+                        report += f"\n✅ Создано {notifications_created} новых уведомлений для администраторов"
+                        await reply.edit_text(report)
+                    else:
+                        await reply.edit_text("✅ Непроверенных платежей нет")
+
+            except Exception as e:
+                error_msg = f"❌ Ошибка при проверке платежей: {str(e)}"
+                logger.error(error_msg, exc_info=True)
+                await message.reply(error_msg)
+
         elif command == "legacy":
 
             try:
