@@ -121,25 +121,25 @@ FAQ_URL = "https://jetup.info/books/user-documents/page/option-alienation-agreem
 REQUIRED_CHANNELS = [
     {
         "chat_id": "@jetnews_en",
-        "title": "JET News English",
+        "title": "JETUP News English",
         "url": "https://t.me/jetnews_en",
         "lang": "en"
     },
     {
         "chat_id": "@jetnews_ru",
-        "title": "JET News Русский",
+        "title": "JETUP News Русский",
         "url": "https://t.me/jetnews_ru",
         "lang": "ru"
     },
     {
         "chat_id": "@jetnews_de",
-        "title": "JET News Deutsch",
+        "title": "JETUP News Deutsch",
         "url": "https://t.me/jetnews_de",
         "lang": "de"
     },
     {
         "chat_id": "@jetnews_in",
-        "title": "JET News Indonesia",
+        "title": "JETUP News Indonesia",
         "url": "https://t.me/jetnews_in",
         "lang": "in"
     }
