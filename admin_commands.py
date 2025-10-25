@@ -856,9 +856,7 @@ class AdminCommands:
                     edit=True
                 )
             else:
-                # Error message
                 error_templates = ['admin/testmail/header']
-                # ... добавляем шаблоны для ошибки
                 error_templates.append('admin/testmail/send_error')
 
                 await self.message_manager.send_template(
