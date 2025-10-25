@@ -969,8 +969,9 @@ class AdminCommands:
 
             # Send starting message
             mode_text = "🧪 TEST MODE" if test_mode else "🚀 FULL BROADCAST"
+            email_text = " (NO EMAIL)" if no_email else ""
             await message.reply(
-                f"<b>{mode_text}</b>\n\n"
+                f"<b>{mode_text}{email_text}</b>\n\n"
                 f"Running in background, you'll receive progress updates every 200 recipients.\n\n"
                 f"Use <code>&broadcast --cancel</code> to stop\n"
                 f"Use <code>&broadcast --status</code> to check progress",
@@ -1013,6 +1014,7 @@ class AdminCommands:
                 try:
                     stats = await broadcast_manager.run_broadcast(
                         test_mode=test_mode,
+                        skip_email=no_email,  # FIXED: Pass the no_email flag
                         progress_callback=send_progress
                     )
                     await on_complete(stats)
@@ -1020,11 +1022,12 @@ class AdminCommands:
                     logger.error(f"Error in broadcast task: {e}", exc_info=True)
                     await message.bot.send_message(
                         chat_id=admin_id,
-                        text=f"🚨 Critical error in broadcast:\n{str(e)}"
+                        text=f"🚨 Critical error in broadcast: {str(e)}",  # FIXED: Complete error message
+                        parse_mode="HTML"
                     )
 
             # Start background task
-            logger.info(f"Admin {admin_id} started broadcast (test={test_mode})")
+            logger.info(f"Admin {admin_id} started broadcast (test={test_mode}, no_email={no_email})")
             asyncio.create_task(run_broadcast_task())
 
         except Exception as e:

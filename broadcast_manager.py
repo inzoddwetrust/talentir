@@ -5,11 +5,11 @@ Sends notifications to Telegram bot and emails based on Google Sheets data
 
 import logging
 import asyncio
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 from datetime import datetime
 from database import User, Notification
 from init import get_session
-from templates import MessageTemplates
+from templates import MessageTemplates, SafeDict
 from google_services import get_google_services
 from email_sender import email_manager
 import config
@@ -40,12 +40,14 @@ class BroadcastManager:
             'bot_failed': 0,
             'email_sent': 0,
             'email_failed': 0,
+            'email_skipped': 0,  # Added for --nomail tracking
             'not_found_in_db': 0,
             'errors': []
         }
         self.is_running = False
         self.should_cancel = False
         self.current_task = None
+        self._lock = asyncio.Lock()
 
     async def initialize(self):
         """Initialize Google Services"""
@@ -148,43 +150,6 @@ class BroadcastManager:
             logger.error(f"Error reading sheet: {e}")
             raise
 
-    async def load_templates(self) -> Dict[str, Tuple[str, str]]:
-        """
-        Load broadcast templates from Google Sheets
-
-        Returns:
-            Dictionary with templates for both languages
-        """
-        try:
-            templates = {}
-
-            # Load bot template (returns tuple: (text, buttons))
-            bot_en = await MessageTemplates.get_raw_template('broadcast_bot', {}, lang='en')
-            bot_ru = await MessageTemplates.get_raw_template('broadcast_bot', {}, lang='ru')
-
-            # Load email templates (subject and body)
-            email_subject_en = await MessageTemplates.get_raw_template('broadcast_email_subject', {}, lang='en')
-            email_subject_ru = await MessageTemplates.get_raw_template('broadcast_email_subject', {}, lang='ru')
-
-            email_body_en = await MessageTemplates.get_raw_template('broadcast_email_body', {}, lang='en')
-            email_body_ru = await MessageTemplates.get_raw_template('broadcast_email_body', {}, lang='ru')
-
-            templates = {
-                'bot_en': bot_en,
-                'bot_ru': bot_ru,
-                'email_subject_en': email_subject_en,
-                'email_subject_ru': email_subject_ru,
-                'email_body_en': email_body_en,
-                'email_body_ru': email_body_ru
-            }
-
-            logger.info("Templates loaded successfully")
-            return templates
-
-        except Exception as e:
-            logger.error(f"Error loading templates: {e}")
-            raise
-
     def find_user_in_db(self, user_id: Optional[str], telegram_id: Optional[str]) -> Optional[tuple]:
         """
         Find user in database by UserID or TelegramID
@@ -237,15 +202,6 @@ class BroadcastManager:
             field_name, value = search_tuple
             logger.info(f"_get_user_from_db: Searching by {field_name}={value} (type: {type(value)})")
 
-            # Debug: Check total users in DB
-            total_users = session.query(User).count()
-            logger.info(f"_get_user_from_db: Total users in database: {total_users}")
-
-            # Debug: Show ALL users in DB (if small number)
-            if total_users <= 5:
-                all_users = session.query(User.userID, User.telegramID, User.firstname).all()
-                logger.info(f"_get_user_from_db: ALL USERS IN DB: {[(u.userID, u.telegramID, u.firstname) for u in all_users]}")
-
             if field_name == 'userID':
                 user = session.query(User).filter_by(userID=value).first()
                 logger.info(f"_get_user_from_db: Query by userID={value} returned: {user}")
@@ -253,14 +209,6 @@ class BroadcastManager:
             elif field_name == 'telegramID':
                 user = session.query(User).filter_by(telegramID=value).first()
                 logger.info(f"_get_user_from_db: Query by telegramID={value} returned: {user}")
-
-                # Debug: Try to find any user with similar telegramID
-                if not user:
-                    similar = session.query(User.telegramID).filter(
-                        User.telegramID.like(f'%{str(value)[-4:]}')
-                    ).limit(5).all()
-                    logger.info(f"_get_user_from_db: Similar telegramIDs in DB: {[s.telegramID for s in similar]}")
-
                 return user
 
             logger.warning(f"_get_user_from_db: Unknown field_name: {field_name}")
@@ -269,26 +217,6 @@ class BroadcastManager:
         except Exception as e:
             logger.error(f"Error querying user by {field_name}={value}: {e}", exc_info=True)
             return None
-
-    def format_template(self, template_text: str, variables: Dict) -> str:
-        """
-        Format template with variables
-
-        Args:
-            template_text: Template string with {placeholders}
-            variables: Dictionary with variable values
-
-        Returns:
-            Formatted string
-        """
-        try:
-            return template_text.format(**variables)
-        except KeyError as e:
-            logger.warning(f"Missing variable in template: {e}")
-            return template_text
-        except Exception as e:
-            logger.error(f"Error formatting template: {e}")
-            return template_text
 
     def _fix_telegram_html(self, text: str) -> str:
         """
@@ -303,34 +231,49 @@ class BroadcastManager:
         """
         return text.replace('<br>', '\n').replace('<br/>', '\n').replace('<br />', '\n')
 
-    async def create_bot_notification(self, user: User, template: Tuple[str, str], variables: Dict) -> bool:
+    async def create_bot_notification(self, user: User, template: Dict, variables: Dict, session=None) -> bool:
         """
         Create notification in database for bot delivery
 
         Args:
             user: User object from database
-            template: Tuple of (text, buttons) from template
+            template: Template dict (from get_template)
             variables: Variables for template formatting
+            session: Optional existing session (if None, creates own)
 
         Returns:
             True if notification created successfully
         """
         try:
-            with SessionFactory() as session:
-                text_template, buttons = template
+            # Use provided session or create new one
+            should_close = False
+            if session is None:
+                session = SessionFactory()
+                session.__enter__()
+                should_close = True
 
-                # Format text with variables and fix Telegram HTML
-                formatted_text = self.format_template(text_template, variables)
+            try:
+                # Extract raw text and buttons from template dict
+                text_template = template['text']
+                buttons = template['buttons']
+
+                # Format text with variables using SafeDict for safety
+                formatted_text = text_template.format_map(SafeDict(variables))
                 formatted_text = self._fix_telegram_html(formatted_text)  # Fix <br> tags
+
+                # Format buttons if they exist
+                formatted_buttons = None
+                if buttons:
+                    formatted_buttons = buttons.format_map(SafeDict(variables))
 
                 # Create notification
                 notification = Notification(
                     source="broadcast",
                     text=formatted_text,
-                    buttons=buttons,  # Buttons already in correct format from template
+                    buttons=formatted_buttons,
                     target_type="user",
                     target_value=str(user.userID),
-                    priority=2,  # High priority
+                    priority=2,
                     category="broadcast",
                     importance="high",
                     parse_mode="HTML",
@@ -338,42 +281,50 @@ class BroadcastManager:
                 )
 
                 session.add(notification)
-                session.commit()
+
+                # Only commit if we created our own session
+                if should_close:
+                    session.commit()
 
                 logger.info(f"Created bot notification for user {user.userID}")
                 return True
+
+            finally:
+                # Only close if we created the session
+                if should_close:
+                    session.__exit__(None, None, None)
 
         except Exception as e:
             logger.error(f"Error creating bot notification for user {user.userID if user else 'unknown'}: {e}")
             return False
 
     async def send_email_notification(
-        self,
-        email: str,
-        subject_template: Tuple[str, str],
-        body_template: Tuple[str, str],
-        variables: Dict
+            self,
+            email: str,
+            subject_template: Dict,
+            body_template: Dict,
+            variables: Dict
     ) -> bool:
         """
-        Send email notification
+        Send email notification with proper variable substitution
 
         Args:
             email: Recipient email address
-            subject_template: Tuple of (text, buttons) for subject
-            body_template: Tuple of (text, buttons) for body
+            subject_template: Template dict for subject (from get_template)
+            body_template: Template dict for body (from get_template)
             variables: Variables for template formatting
 
         Returns:
             True if email sent successfully
         """
         try:
-            # Extract text from tuples (ignore buttons for email)
-            subject_text = subject_template[0] if isinstance(subject_template, tuple) else subject_template
-            body_text = body_template[0] if isinstance(body_template, tuple) else body_template
+            # Extract text from template dicts
+            subject_text = subject_template['text']
+            body_text = body_template['text']
 
-            # Format templates
-            subject = self.format_template(subject_text, variables)
-            body = self.format_template(body_text, variables)
+            # Format templates with variables using SafeDict
+            subject = subject_text.format_map(SafeDict(variables))
+            body = body_text.format_map(SafeDict(variables))
 
             # Send email
             success = await email_manager.send_notification_email(
@@ -394,18 +345,19 @@ class BroadcastManager:
             return False
 
     async def process_single_recipient(
-        self,
-        row_number: int,
-        recipient_data: Dict,
-        templates: Dict
+            self,
+            row_number: int,
+            recipient_data: Dict,
+            skip_email: bool = False
     ) -> Dict:
         """
         Process single recipient - send to bot and/or email
+        Templates are loaded on-demand based on user's language
 
         Args:
             row_number: Row number in sheet (for error reporting)
             recipient_data: Dictionary with recipient data
-            templates: Dictionary with all templates
+            skip_email: If True, skip email sending
 
         Returns:
             Dictionary with processing results
@@ -423,7 +375,7 @@ class BroadcastManager:
         firstname = recipient_data.get('Firstname', '').strip()
         lastname = recipient_data.get('Lastname', '').strip()
         amount = recipient_data.get('Amount of DARWIN in USD', '').strip()
-        broker_code = recipient_data.get('#DW', '').strip()  # Extract broker code from column H
+        broker_code = recipient_data.get('#DW', '').strip()
 
         # Prepare variables for templates
         variables = {
@@ -433,7 +385,7 @@ class BroadcastManager:
             'amount': amount or '0',
             'user_id': user_id or 'N/A',
             'telegram_id': telegram_id or 'N/A',
-            'broker_code': broker_code or 'N/A'  # Add broker code to variables
+            'broker_code': broker_code or 'N/A'
         }
 
         # Try to find user in database
@@ -448,25 +400,37 @@ class BroadcastManager:
 
                 if user:
                     result['user_found'] = True
-                    user_lang = user.lang if user.lang in ['en', 'ru'] else 'en'
+                    # Use user's language from DB (auto-fallback to 'en' in get_template)
+                    user_lang = user.lang or 'en'
+                    logger.info(f"User {user.userID} language: {user_lang}")
 
                     # Send bot notification
                     try:
-                        bot_template = templates[f'bot_{user_lang}']
-                        bot_success = await self.create_bot_notification(user, bot_template, variables)
-                        result['bot_sent'] = bot_success
+                        # Get template for user's language (auto-fallback to English if not exists)
+                        bot_template = await MessageTemplates.get_template('broadcast_bot', lang=user_lang)
 
-                        if bot_success:
-                            # Mark user as received DARWIN broadcast in notes
-                            import helpers
-                            helpers.set_user_note(user, 'dwBroadcast', '1')
-                            # Save broker code to notes for future reference
-                            if broker_code:
-                                helpers.set_user_note(user, 'dwBrokerCode', broker_code)
-                            session.commit()
-                            logger.info(f"Marked user {user.userID} as received DARWIN broadcast with code {broker_code}")
+                        if not bot_template:
+                            logger.error(f"Bot template not found for any language")
+                            result['errors'].append("Bot template not found")
                         else:
-                            result['errors'].append(f"Failed to create bot notification")
+                            bot_success = await self.create_bot_notification(
+                                user,
+                                bot_template,
+                                variables,
+                                session=session
+                            )
+                            result['bot_sent'] = bot_success
+
+                            if bot_success:
+                                # Mark user as received DARWIN broadcast in notes
+                                import helpers
+                                helpers.set_user_note(user, 'dwBroadcast', '1')
+                                if broker_code:
+                                    helpers.set_user_note(user, 'dwBrokerCode', broker_code)
+                                session.commit()
+                                logger.info(f"Marked user {user.userID} as received DARWIN broadcast with code {broker_code}")
+                            else:
+                                result['errors'].append(f"Failed to create bot notification")
 
                     except Exception as e:
                         logger.error(f"Error processing bot notification for row {row_number}: {e}")
@@ -477,34 +441,42 @@ class BroadcastManager:
             result['errors'].append("User not found in database")
             logger.warning(f"Row {row_number}: User not found - UserID: {user_id}, TelegramID: {telegram_id}")
 
-        # Send email if email address provided
-        if email:
+        # Send email if email address provided and not skipping emails
+        if email and not skip_email:
             try:
-                subject_template = templates[f'email_subject_{user_lang}']
-                body_template = templates[f'email_body_{user_lang}']
+                # Get email templates for user's language (auto-fallback to English)
+                email_subject_template = await MessageTemplates.get_template('broadcast_email_subject', lang=user_lang)
+                email_body_template = await MessageTemplates.get_template('broadcast_email_body', lang=user_lang)
 
-                email_success = await self.send_email_notification(
-                    email,
-                    subject_template,
-                    body_template,
-                    variables
-                )
-                result['email_sent'] = email_success
+                if not email_subject_template or not email_body_template:
+                    logger.error(f"Email templates not found for language {user_lang}")
+                    result['errors'].append("Email templates not found")
+                else:
+                    email_success = await self.send_email_notification(
+                        email,
+                        email_subject_template,
+                        email_body_template,
+                        variables
+                    )
+                    result['email_sent'] = email_success
 
-                if not email_success:
-                    result['errors'].append(f"Failed to send email")
+                    if not email_success:
+                        result['errors'].append(f"Failed to send email")
 
             except Exception as e:
                 logger.error(f"Error processing email for row {row_number}: {e}")
                 result['errors'].append(f"Email error: {str(e)}")
+        elif email and skip_email:
+            logger.debug(f"Skipping email for row {row_number} due to --nomail flag")
 
         return result
 
     async def run_broadcast(
-        self,
-        sheet_url: str = BROADCAST_SHEET_URL,
-        test_mode: bool = False,
-        progress_callback=None
+            self,
+            sheet_url: str = BROADCAST_SHEET_URL,
+            test_mode: bool = False,
+            skip_email: bool = False,
+            progress_callback=None
     ) -> Dict:
         """
         Main method to run broadcast campaign
@@ -512,25 +484,43 @@ class BroadcastManager:
         Args:
             sheet_url: URL of Google Sheets with recipients
             test_mode: If True, only process first 10 recipients
+            skip_email: If True, skip email sending (--nomail flag)
             progress_callback: Optional async callback for progress updates
 
         Returns:
             Dictionary with campaign statistics
         """
-        # Check if already running
-        if self.is_running:
-            logger.warning("Broadcast is already running")
-            return {'error': 'Broadcast is already running'}
+        # Use lock to prevent race condition
+        async with self._lock:
+            # Check if already running
+            if self.is_running:
+                logger.warning("Broadcast is already running")
+                return {'error': 'Broadcast is already running'}
 
-        self.is_running = True
-        self.should_cancel = False
+            self.is_running = True
+            self.should_cancel = False
+
         start_time = datetime.now()
-        logger.info(f"Starting broadcast {'(TEST MODE)' if test_mode else ''}")
+        logger.info(f"Starting broadcast {'(TEST MODE)' if test_mode else ''} {'(NO EMAIL)' if skip_email else ''}")
 
         try:
             # Initialize if needed
             if not self.google_services:
                 await self.initialize()
+                if not self.google_services:
+                    raise Exception("Failed to initialize Google Services")
+
+            # Reset statistics
+            self.stats = {
+                'total_recipients': 0,
+                'bot_sent': 0,
+                'bot_failed': 0,
+                'email_sent': 0,
+                'email_failed': 0,
+                'email_skipped': 0,
+                'not_found_in_db': 0,
+                'errors': []
+            }
 
             # Load recipients
             recipients = await self.read_recipients_from_sheet(sheet_url, test_mode)
@@ -540,9 +530,7 @@ class BroadcastManager:
 
             self.stats['total_recipients'] = len(recipients)
             logger.info(f"Processing {len(recipients)} recipients")
-
-            # Load templates
-            templates = await self.load_templates()
+            logger.info("Templates will be loaded per-user based on their language with auto-fallback to English")
 
             # Process recipients in batches
             email_batch = []
@@ -557,11 +545,11 @@ class BroadcastManager:
                     break
 
                 try:
-                    # Process recipient
+                    # Process recipient with skip_email flag
                     result = await self.process_single_recipient(
                         row_number=idx + 1,  # +1 because of header row
                         recipient_data=recipient_data,
-                        templates=templates
+                        skip_email=skip_email
                     )
 
                     # Update statistics
@@ -570,7 +558,9 @@ class BroadcastManager:
                     elif result['user_found']:
                         self.stats['bot_failed'] += 1
 
-                    if result['email_sent']:
+                    if skip_email and recipient_data.get('Email', '').strip():
+                        self.stats['email_skipped'] += 1
+                    elif result['email_sent']:
                         self.stats['email_sent'] += 1
                         email_batch.append(recipient_data.get('Email', ''))
                     elif recipient_data.get('Email', '').strip():
@@ -595,8 +585,8 @@ class BroadcastManager:
                     if progress_callback and processed_count % PROGRESS_REPORT_EVERY == 0:
                         await progress_callback(processed_count, self.stats.copy())
 
-                    # Batch delay for emails
-                    if len(email_batch) >= BATCH_SIZE:
+                    # Batch delay for emails (only if not skipping emails)
+                    if not skip_email and len(email_batch) >= BATCH_SIZE:
                         logger.info(f"Processed batch of {len(email_batch)} emails, waiting {BATCH_DELAY}s...")
                         await asyncio.sleep(BATCH_DELAY)
                         email_batch = []
@@ -612,13 +602,14 @@ class BroadcastManager:
                     })
 
             # Final batch delay if any emails left
-            if email_batch:
+            if not skip_email and email_batch:
                 await asyncio.sleep(BATCH_DELAY)
 
             # Calculate duration
             duration = datetime.now() - start_time
             self.stats['duration'] = str(duration)
             self.stats['test_mode'] = test_mode
+            self.stats['skip_email'] = skip_email
 
             logger.info(f"Broadcast completed in {duration}")
             return self.stats
@@ -643,8 +634,9 @@ class BroadcastManager:
         """
         test_marker = "🧪 TEST MODE\n\n" if stats.get('test_mode', False) else ""
         cancelled_marker = "🛑 CANCELLED\n\n" if stats.get('cancelled', False) else ""
+        no_email_marker = "📧 EMAIL SKIPPED\n\n" if stats.get('skip_email', False) else ""
 
-        report = f"{test_marker}{cancelled_marker}📊 <b>Broadcast Report</b>\n\n"
+        report = f"{test_marker}{cancelled_marker}{no_email_marker}📊 <b>Broadcast Report</b>\n\n"
         report += f"👥 Total recipients: {stats['total_recipients']}\n"
 
         if stats.get('cancelled'):
@@ -652,8 +644,13 @@ class BroadcastManager:
 
         report += f"✅ Bot sent: {stats['bot_sent']}\n"
         report += f"❌ Bot failed: {stats['bot_failed']}\n"
-        report += f"📧 Email sent: {stats['email_sent']}\n"
-        report += f"❌ Email failed: {stats['email_failed']}\n"
+
+        if not stats.get('skip_email'):
+            report += f"📧 Email sent: {stats['email_sent']}\n"
+            report += f"❌ Email failed: {stats['email_failed']}\n"
+        else:
+            report += f"⏭ Email skipped: {stats.get('email_skipped', 0)}\n"
+
         report += f"⚠️ Not found in DB: {stats['not_found_in_db']}\n"
 
         if stats.get('duration'):
@@ -665,7 +662,7 @@ class BroadcastManager:
         # Add errors summary
         if stats['errors']:
             report += f"\n\n❌ <b>Errors ({len(stats['errors'])}):</b>\n"
-            for i, error in enumerate(stats['errors'][:10], 1):  # Show first 10 errors
+            for i, error in enumerate(stats['errors'][:10], 1):
                 report += f"\n{i}. Row {error['row']}"
                 if error.get('user_id'):
                     report += f" | UserID: {error['user_id']}"
