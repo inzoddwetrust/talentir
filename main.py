@@ -460,6 +460,9 @@ async def get_dashboard_template_keys(user: User) -> list:
     elif user.isFilled and not helpers.is_email_confirmed(user):
         template_keys.append('settings_filled_unconfirmed')
 
+    if helpers.get_user_note(user, 'dwBroadcast') == '1':
+        template_keys.append('dashboard_dw_instructions_button')
+
     return template_keys
 
 @dp.callback_query_handler(lambda c: c.data == "/check/subscription", state="*")
@@ -2879,6 +2882,39 @@ async def download_project_pdf(user: User, callback_query: types.CallbackQuery, 
         logger.error(f"Callback data: {callback_query.data}")
         logger.error(f"User: {user.userID}")
         await callback_query.answer("An error occurred while processing your request!")
+
+
+@dp.callback_query_handler(lambda c: c.data == "/dw/instructions", state="*")
+@with_user
+async def handle_dw_instructions(user: User, callback_query: types.CallbackQuery, session: Session):
+    """Handler for DARWIN instructions callback - reads broker code from notes"""
+    try:
+        # Get broker code from user notes
+        broker_code = helpers.get_user_note(user, 'dwBrokerCode')
+
+        if not broker_code:
+            # Fallback if broker code not found
+            broker_code = 'N/A'
+            logger.warning(f"User {user.userID} requested instructions but has no broker code in notes")
+
+        # Show instructions template with broker code
+        await message_manager.send_template(
+            user=user,
+            template_key='dw_instructions',
+            update=callback_query,
+            variables={'broker_code': broker_code},
+            delete_original=False,
+            edit=False
+        )
+
+        # Answer callback to remove loading state
+        await callback_query.answer()
+
+        logger.info(f"User {user.userID} viewed DARWIN instructions with code {broker_code}")
+
+    except Exception as e:
+        logger.error(f"Error handling dw_instructions callback: {e}", exc_info=True)
+        await callback_query.answer("Error loading instructions", show_alert=True)
 
 
 @dp.callback_query_handler(lambda c: c.data == "/dashboard/existingUser", state="*")

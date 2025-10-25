@@ -8,23 +8,24 @@ import shutil
 from typing import Dict
 from aiogram.dispatcher.handler import CancelHandler
 from aiogram.dispatcher.middlewares import BaseMiddleware
-from bookstack_integration import clear_template_cache
+from datetime import datetime
 
 import config
+from sync_system.sync_engine import UniversalSyncEngine
+from sync_system.sync_config import SYNC_CONFIG, SUPPORT_TABLES
 from imports import (
     ProjectImporter, UserImporter, OptionImporter,
     ConfigImporter, import_all
 )
 
-from sync_system.sync_engine import UniversalSyncEngine
-from sync_system.sync_config import SYNC_CONFIG, SUPPORT_TABLES
+from bookstack_integration import clear_template_cache
 from database import Bonus, Project, Purchase, ActiveBalance, PassiveBalance
 from templates import MessageTemplates
 from google_services import get_google_services
 from sqlalchemy import func
 from database import Payment, Notification, User
 from init import Session
-from datetime import datetime
+
 
 logger = logging.getLogger(__name__)
 
@@ -882,6 +883,157 @@ class AdminCommands:
             await message.reply(f"❌ Critical error: {str(e)}")
             logger.error(f"Error in testmail command: {e}", exc_info=True)
 
+    """
+    SIMPLE REPLACEMENT - Just replace the method in AdminCommands class
+
+    Find this method in admin_commands.py:
+        async def handle_broadcast(self, message: types.Message):
+            ...
+
+    And replace with this version:
+    """
+
+    async def handle_broadcast(self, message: types.Message):
+        """
+        Handler for &broadcast command - async background version
+
+        Usage:
+            &broadcast          - Run full broadcast (background)
+            &broadcast --test   - Test mode (first 10 recipients)
+            &broadcast --nomail - Skip email sending (bot only)
+            &broadcast --status - Check current progress
+            &broadcast --cancel - Stop running broadcast
+        """
+        try:
+            # Parse command arguments
+            command_parts = message.text.strip().split()
+            test_mode = '--test' in command_parts
+            no_email = '--nomail' in command_parts
+            check_status = '--status' in command_parts
+            cancel_broadcast = '--cancel' in command_parts
+
+            # Import broadcast manager
+            from broadcast_manager import broadcast_manager
+
+            # Handle --status
+            if check_status:
+                status = broadcast_manager.get_status()
+                if not status['is_running']:
+                    await message.reply("ℹ️ No broadcast is currently running")
+                    return
+
+                stats = status['stats']
+                status_msg = (
+                    f"📊 <b>Broadcast Status</b>\n\n"
+                    f"🔄 <b>Running...</b>\n\n"
+                    f"Progress: {stats['bot_sent'] + stats['email_sent']}/{stats['total_recipients']}\n"
+                    f"✅ Bot sent: {stats['bot_sent']}\n"
+                    f"📧 Emails sent: {stats['email_sent']}\n"
+                    f"❌ Errors: {len(stats['errors'])}"
+                )
+                await message.reply(status_msg, parse_mode="HTML")
+                return
+
+            # Handle --cancel
+            if cancel_broadcast:
+                if not broadcast_manager.is_running:
+                    await message.reply("ℹ️ No broadcast is currently running")
+                    return
+
+                if broadcast_manager.cancel_broadcast():
+                    await message.reply(
+                        "🛑 Cancellation requested!\n\n"
+                        "Broadcast will stop after processing current recipient.\n"
+                        "You'll receive a final report shortly.",
+                        parse_mode="HTML"
+                    )
+                else:
+                    await message.reply("❌ Failed to cancel broadcast")
+                return
+
+            # Check if already running
+            if broadcast_manager.is_running:
+                await message.reply(
+                    "⚠️ Broadcast is already running!\n\n"
+                    "Use <code>&broadcast --status</code> to check progress\n"
+                    "Use <code>&broadcast --cancel</code> to stop it",
+                    parse_mode="HTML"
+                )
+                return
+
+            # Get admin info
+            admin_id = message.from_user.id
+            with Session() as session:
+                admin_user = session.query(User).filter_by(telegramID=admin_id).first()
+                if not admin_user:
+                    await message.reply("❌ Admin user not found")
+                    return
+
+            # Send starting message
+            mode_text = "🧪 TEST MODE" if test_mode else "🚀 FULL BROADCAST"
+            await message.reply(
+                f"<b>{mode_text}</b>\n\n"
+                f"Running in background, you'll receive progress updates every 200 recipients.\n\n"
+                f"Use <code>&broadcast --cancel</code> to stop\n"
+                f"Use <code>&broadcast --status</code> to check progress",
+                parse_mode="HTML"
+            )
+
+            # Progress callback
+            async def send_progress(processed: int, stats: dict):
+                try:
+                    progress_msg = (
+                        f"📊 <b>Progress Update</b>\n\n"
+                        f"Processed: {processed}/{stats['total_recipients']}\n"
+                        f"✅ Bot sent: {stats['bot_sent']}\n"
+                        f"📧 Emails sent: {stats['email_sent']}\n"
+                        f"❌ Errors: {len(stats['errors'])}"
+                    )
+                    await message.bot.send_message(
+                        chat_id=admin_id,
+                        text=progress_msg,
+                        parse_mode="HTML"
+                    )
+                except Exception as e:
+                    logger.error(f"Error sending progress update: {e}")
+
+            # Completion callback
+            async def on_complete(stats: dict):
+                try:
+                    report = broadcast_manager.format_report(stats)
+                    await message.bot.send_message(
+                        chat_id=admin_id,
+                        text=report,
+                        parse_mode="HTML"
+                    )
+                    logger.info(f"Broadcast completed: {stats['bot_sent']} bot, {stats['email_sent']} email")
+                except Exception as e:
+                    logger.error(f"Error sending completion report: {e}")
+
+            # Background task
+            async def run_broadcast_task():
+                try:
+                    stats = await broadcast_manager.run_broadcast(
+                        test_mode=test_mode,
+                        progress_callback=send_progress
+                    )
+                    await on_complete(stats)
+                except Exception as e:
+                    logger.error(f"Error in broadcast task: {e}", exc_info=True)
+                    await message.bot.send_message(
+                        chat_id=admin_id,
+                        text=f"🚨 Critical error in broadcast:\n{str(e)}"
+                    )
+
+            # Start background task
+            logger.info(f"Admin {admin_id} started broadcast (test={test_mode})")
+            asyncio.create_task(run_broadcast_task())
+
+        except Exception as e:
+            error_msg = f"❌ Error: {str(e)}"
+            await message.reply(error_msg)
+            logger.error(f"Error in broadcast command: {e}", exc_info=True)
+
     async def handle_delpurchase(self, message: types.Message):
         """Handler for &delpurchase command to safely delete purchase records"""
         try:
@@ -1171,6 +1323,9 @@ class AdminCommands:
 
         elif command == "testmail":
             await self.handle_testmail(message)
+
+        elif command == "broadcast":
+            await self.handle_broadcast(message)
 
         elif command == "check":
             # Проверка платежей
