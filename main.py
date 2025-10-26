@@ -2893,11 +2893,10 @@ async def handle_dw_instructions(user: User, callback_query: types.CallbackQuery
         broker_code = helpers.get_user_note(user, 'dwBrokerCode')
 
         if not broker_code:
-            # Fallback if broker code not found
             broker_code = 'N/A'
             logger.warning(f"User {user.userID} requested instructions but has no broker code in notes")
 
-        # Show instructions template with broker code and email
+        # Show instructions template (send_template will handle callback.answer() automatically)
         await message_manager.send_template(
             user=user,
             template_key='dw_instructions',
@@ -2910,14 +2909,11 @@ async def handle_dw_instructions(user: User, callback_query: types.CallbackQuery
             edit=False
         )
 
-        # Answer callback to remove loading state
-        await callback_query.answer()
-
         logger.info(f"User {user.userID} viewed DARWIN instructions with code {broker_code}")
 
     except Exception as e:
         logger.error(f"Error handling dw_instructions callback: {e}", exc_info=True)
-        await callback_query.answer("Error loading instructions", show_alert=True)
+        # Don't answer here - callback might be already answered or expired
 
 
 @dp.callback_query_handler(lambda c: c.data == "/dashboard/existingUser", state="*")
