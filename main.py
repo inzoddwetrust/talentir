@@ -2887,7 +2887,7 @@ async def download_project_pdf(user: User, callback_query: types.CallbackQuery, 
 @dp.callback_query_handler(lambda c: c.data == "/dw/instructions", state="*")
 @with_user
 async def handle_dw_instructions(user: User, callback_query: types.CallbackQuery, session: Session):
-    """Handler for DARWIN instructions callback - reads broker code from notes"""
+    """Handler for DARWIN instructions callback - reads broker code and email from user data"""
     try:
         # Get broker code from user notes
         broker_code = helpers.get_user_note(user, 'dwBrokerCode')
@@ -2897,12 +2897,15 @@ async def handle_dw_instructions(user: User, callback_query: types.CallbackQuery
             broker_code = 'N/A'
             logger.warning(f"User {user.userID} requested instructions but has no broker code in notes")
 
-        # Show instructions template with broker code
+        # Show instructions template with broker code and email
         await message_manager.send_template(
             user=user,
             template_key='dw_instructions',
             update=callback_query,
-            variables={'broker_code': broker_code},
+            variables={
+                'broker_code': broker_code,
+                'email': user.email or 'N/A'
+            },
             delete_original=False,
             edit=False
         )
