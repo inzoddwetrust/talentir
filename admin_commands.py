@@ -73,6 +73,320 @@ class AdminCommands:
             state='*'
         )
 
+    async def _add_balance_to_user(self, session, user_id: int, amount: float, reason: str, admin_user) -> tuple[
+        bool, str]:
+        """Add balance to user and create ActiveBalance record
+
+        Args:
+            session: Database session
+            user_id: User ID to add balance to
+            amount: Amount to add (can be negative)
+            reason: Reason for balance change
+            admin_user: Admin user making the change
+
+        Returns:
+            (success: bool, message: str)
+        """
+        try:
+            # Get user
+            user = session.query(User).filter_by(userID=user_id).first()
+            if not user:
+                return False, f"User {user_id} not found"
+
+            # Update balance
+            user.balanceActive += amount
+
+            # Create ActiveBalance record
+            admin_name = admin_user.firstname if admin_user else "Unknown Admin"
+            balance_record = ActiveBalance(
+                userID=admin_user.userID if admin_user else 0,
+                firstname=admin_name,
+                surname=admin_user.surname if admin_user else '',
+                amount=amount,
+                status='done',
+                reason=reason,
+                notes=f'Balance manually adjusted by admin: {admin_name}. Target user: {user.firstname} (ID: {user_id})'
+            )
+            session.add(balance_record)
+
+            return True, f"Added ${amount:.2f} to {user.firstname} (ID: {user_id})"
+
+        except Exception as e:
+            logger.error(f"Error adding balance: {e}", exc_info=True)
+            return False, str(e)
+
+    async def handle_addbalance(self, message: types.Message):
+        """Handler for &addbalance command to manually adjust user balance
+
+        Usage: &addbalance --u <userID> --$ <amount> --r <reason> --confirm
+        """
+        try:
+            command_text = message.text.strip()
+
+            # Parse arguments
+            if '--u' not in command_text or '--$' not in command_text:
+                await message.reply(
+                    "❌ Invalid command format!\n\n"
+                    "Usage: <code>&addbalance --u &lt;userID&gt; --$ &lt;amount&gt; --r &lt;reason&gt; --confirm</code>\n\n"
+                    "Examples:\n"
+                    "<code>&addbalance --u 123 --$ 100.50 --confirm</code>\n"
+                    "<code>&addbalance --u 123 --$ -50 --r refund for order 456 --confirm</code>\n\n"
+                    "Note: --r (reason) is optional",
+                    parse_mode='HTML'
+                )
+                return
+
+            # Extract user_id
+            user_id_match = command_text.split('--u')[1].strip().split()[0]
+            try:
+                user_id = int(user_id_match)
+            except ValueError:
+                await message.reply("❌ Invalid user ID format")
+                return
+
+            # Extract amount
+            amount_match = command_text.split('--$')[1].strip().split()[0]
+            try:
+                amount = float(amount_match)
+            except ValueError:
+                await message.reply("❌ Invalid amount format")
+                return
+
+            # Extract reason (optional)
+            reason = "manual_adjustment"
+            if '--r' in command_text:
+                reason_part = command_text.split('--r')[1].strip()
+                # Get text until next -- or end of string
+                if '--confirm' in reason_part:
+                    reason = reason_part.split('--confirm')[0].strip()
+                else:
+                    reason = reason_part.strip()
+
+            # Check for --confirm flag
+            confirm_mode = '--confirm' in command_text
+
+            with Session() as session:
+                # Get user for preview
+                user = session.query(User).filter_by(userID=user_id).first()
+                if not user:
+                    await message.reply(f"❌ User {user_id} not found")
+                    return
+
+                # If NOT confirm mode - show preview
+                if not confirm_mode:
+                    current_balance = user.balanceActive
+                    new_balance = current_balance + amount
+
+                    preview = (
+                        f"💰 <b>Balance Change Preview</b>\n\n"
+                        f"👤 User: {user.firstname} {user.surname or ''} (ID: {user_id})\n"
+                        f"💵 Current balance: ${current_balance:.2f}\n"
+                        f"➕ Change: ${amount:+.2f}\n"
+                        f"💵 New balance: ${new_balance:.2f}\n"
+                        f"📝 Reason: {reason}\n\n"
+                        f"To confirm, use:\n"
+                        f"<code>&addbalance --u {user_id} --$ {amount} --r {reason} --confirm</code>"
+                    )
+
+                    await message.reply(preview, parse_mode='HTML')
+                    return
+
+                # CONFIRM MODE - Add balance
+                admin_user = session.query(User).filter_by(telegramID=message.from_user.id).first()
+
+                success, result_msg = await self._add_balance_to_user(
+                    session, user_id, amount, reason, admin_user
+                )
+
+                if not success:
+                    await message.reply(f"❌ Error: {result_msg}")
+                    return
+
+                # Commit
+                session.commit()
+
+                # Success message
+                await message.reply(
+                    f"✅ <b>Balance updated successfully!</b>\n\n"
+                    f"👤 User: {user.firstname} {user.surname or ''} (ID: {user_id})\n"
+                    f"💵 Amount: ${amount:+.2f}\n"
+                    f"💵 New balance: ${user.balanceActive:.2f}\n"
+                    f"📝 Reason: {reason}",
+                    parse_mode='HTML'
+                )
+
+                logger.info(f"Admin {message.from_user.id} added ${amount} to user {user_id}")
+
+        except Exception as e:
+            logger.error(f"Error in addbalance: {e}", exc_info=True)
+            await message.reply(f"❌ Error: {str(e)}")
+
+    async def handle_delpurchase(self, message: types.Message):
+        """Handler for &delpurchase command to safely delete purchase records"""
+        try:
+            # Parse command arguments
+            command_parts = message.text.strip().split()
+
+            if len(command_parts) < 2:
+                await message.reply(
+                    "❌ Invalid command format!\n\n"
+                    "Usage: <code>&delpurchase {purchaseID} [--refund] [--confirm]</code>\n\n"
+                    "Examples:\n"
+                    "<code>&delpurchase 123</code> - Analyze purchase\n"
+                    "<code>&delpurchase 123 --confirm</code> - Delete purchase\n"
+                    "<code>&delpurchase 123 --refund --confirm</code> - Delete and refund user",
+                    parse_mode='HTML'
+                )
+                return
+
+            try:
+                purchase_id = int(command_parts[1])
+            except ValueError:
+                await message.reply("❌ Purchase ID must be a number")
+                return
+
+            # Check for flags
+            confirm_mode = '--confirm' in command_parts
+            refund_mode = '--refund' in command_parts
+
+            reply = await message.reply(f"🔄 {'Deleting' if confirm_mode else 'Analyzing'} purchase {purchase_id}...")
+
+            with Session() as session:
+                # First, get purchase details
+                purchase = session.query(Purchase).filter_by(purchaseID=purchase_id).first()
+
+                if not purchase:
+                    await reply.edit_text(f"❌ Purchase {purchase_id} not found")
+                    return
+
+                # Get user info
+                user = session.query(User).filter_by(userID=purchase.userID).first()
+                user_name = user.firstname if user else "Unknown"
+
+                # Check for related records
+                related_bonuses = session.query(Bonus).filter_by(purchaseID=purchase_id).all()
+                related_active_balance = session.query(ActiveBalance).filter(
+                    ActiveBalance.reason.like(f'%purchase={purchase_id}%')
+                ).all()
+
+                # If NOT confirm mode - show analysis and exit
+                if not confirm_mode:
+                    analysis = (
+                        f"📊 <b>Purchase Analysis</b>\n\n"
+                        f"🆔 Purchase ID: {purchase_id}\n"
+                        f"👤 User: {user_name} (ID: {purchase.userID})\n"
+                        f"📦 Project: {purchase.projectName} (ID: {purchase.projectID})\n"
+                        f"🎯 Quantity: {purchase.packQty} shares\n"
+                        f"💰 Price: ${purchase.packPrice:.2f}\n"
+                        f"🔧 Option: {purchase.optionID}\n"
+                        f"📅 Date: {purchase.createdAt.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                        f"🔗 <b>Related Records:</b>\n"
+                        f"• Bonuses: {len(related_bonuses)}\n"
+                        f"• Active Balance: {len(related_active_balance)}\n\n"
+                    )
+
+                    if related_bonuses:
+                        total_bonuses = sum(b.bonusAmount for b in related_bonuses)
+                        analysis += f"💰 Total bonuses paid: ${total_bonuses:.2f}\n\n"
+
+                    analysis += (
+                        "⚠️ This will permanently delete the purchase and ALL related records!\n\n"
+                        f"To delete: <code>&delpurchase {purchase_id} --confirm</code>\n"
+                        f"To delete + refund: <code>&delpurchase {purchase_id} --refund --confirm</code>"
+                    )
+
+                    await reply.edit_text(analysis, parse_mode='HTML')
+                    return
+
+                # CONFIRM MODE - Create backup first
+                try:
+                    await reply.edit_text(f"🔄 Creating backup before deletion...")
+                    backup_path = await self._create_backup(category='manual')
+                    logger.info(f"Backup created: {backup_path}")
+                    await reply.edit_text(f"🔄 Backup created. Deleting purchase {purchase_id}...")
+                except Exception as e:
+                    error_msg = f"❌ Failed to create backup: {str(e)}\nDeletion cancelled for safety."
+                    logger.error(f"Backup failed: {e}", exc_info=True)
+                    await reply.edit_text(error_msg)
+                    return
+
+                try:
+                    # 1. Delete related bonuses
+                    bonuses = session.query(Bonus).filter_by(purchaseID=purchase_id).all()
+                    total_bonuses_removed = sum(b.bonusAmount for b in bonuses)
+
+                    session.query(Bonus).filter_by(purchaseID=purchase_id).delete()
+
+                    # 2. Delete related active balance records
+                    active_balance_records = session.query(ActiveBalance).filter(
+                        ActiveBalance.reason.like(f'%purchase={purchase_id}%')
+                    ).all()
+
+                    session.query(ActiveBalance).filter(
+                        ActiveBalance.reason.like(f'%purchase={purchase_id}%')
+                    ).delete(synchronize_session=False)
+
+                    # 3. Delete the purchase record
+                    session.query(Purchase).filter_by(purchaseID=purchase_id).delete()
+
+                    # 4. If refund mode - add balance back to user
+                    refund_amount = 0
+                    if refund_mode:
+                        refund_amount = purchase.packPrice
+                        admin_user = session.query(User).filter_by(telegramID=message.from_user.id).first()
+
+                        success, refund_msg = await self._add_balance_to_user(
+                            session,
+                            purchase.userID,
+                            refund_amount,
+                            f'refund_purchase={purchase_id}',
+                            admin_user
+                        )
+
+                        if not success:
+                            session.rollback()
+                            await reply.edit_text(f"❌ Refund failed: {refund_msg}\nTransaction rolled back.")
+                            return
+
+                    # Commit transaction
+                    session.commit()
+
+                    # Success message
+                    user_info = f"{user.firstname} (ID: {user.userID})" if user else f"Unknown (ID: {purchase.userID})"
+
+                    success_msg = (
+                        f"✅ <b>Purchase {purchase_id} deleted successfully!</b>\n\n"
+                        f"📊 <b>Deleted:</b>\n"
+                        f"• Purchase: {purchase.packQty} shares of {purchase.projectName}\n"
+                        f"• Bonuses: {len(bonuses)} records (${total_bonuses_removed:.2f})\n"
+                        f"• Balance records: {len(active_balance_records)}\n\n"
+                        f"👤 User: {user_info}\n"
+                    )
+
+                    if refund_mode:
+                        success_msg += f"💰 Refunded: ${refund_amount:.2f}\n"
+
+                    success_msg += f"💾 Backup: {os.path.basename(backup_path)}"
+
+                    await reply.edit_text(success_msg, parse_mode='HTML')
+
+                    logger.info(
+                        f"Purchase {purchase_id} deleted by admin {message.from_user.id}{' with refund' if refund_mode else ''}")
+
+                except Exception as e:
+                    session.rollback()
+                    logger.error(f"Error during deletion transaction: {e}", exc_info=True)
+                    await reply.edit_text(
+                        f"❌ Error during deletion: {str(e)}\n\n"
+                        f"Transaction rolled back. Database unchanged.\n"
+                        f"Backup available: {os.path.basename(backup_path)}"
+                    )
+                    raise
+
+        except Exception as e:
+            logger.error(f"Error in delpurchase: {e}", exc_info=True)
+            await message.reply(f"❌ Error: {str(e)}")
+
     async def _import_sheet(self, message: types.Message, importer_class, sheet_name: str):
         """Общий метод для импорта данных"""
         reply = None
@@ -439,15 +753,19 @@ class AdminCommands:
 
         return report
 
-    async def _create_backup(self) -> str:
-        """Создает бэкап БД перед импортом"""
+    async def _create_backup(self, category: str = 'import') -> str:
+        """Создает бэкап БД
+
+        Args:
+            category: Категория бэкапа - 'import', 'manual', 'daily', 'restore'
+        """
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-        # Берем директорию из конфига
-        backup_dir = config.BACKUP_BASE_DIR
+        # Берем нужную директорию из конфига
+        backup_dir = config.BACKUP_DIRS.get(category, config.BACKUP_DIRS['manual'])
         os.makedirs(backup_dir, exist_ok=True)
 
-        # ИСПРАВЛЕНИЕ: извлекаем путь из DATABASE_URL
+        # Извлекаем путь из DATABASE_URL
         if config.DATABASE_URL.startswith("sqlite:///"):
             db_path = config.DATABASE_URL.replace("sqlite:///", "")
         else:
@@ -468,7 +786,6 @@ class AdminCommands:
             for old_backup in backups[:-20]:
                 os.remove(os.path.join(backup_dir, old_backup))
 
-        logger.info(f"Created backup: {backup_path}")
         return backup_path
 
     async def handle_object(self, message: types.Message):
@@ -1035,242 +1352,6 @@ class AdminCommands:
             await message.reply(error_msg)
             logger.error(f"Error in broadcast command: {e}", exc_info=True)
 
-    async def handle_delpurchase(self, message: types.Message):
-        """Handler for &delpurchase command to safely delete purchase records"""
-        try:
-            # Parse command arguments
-            command_parts = message.text.strip().split()
-
-            if len(command_parts) != 2:
-                await message.reply(
-                    "❌ Invalid command format!\n\n"
-                    "Usage: &delpurchase {purchaseID}\n\n"
-                    "Example: &delpurchase 123"
-                )
-                return
-
-            try:
-                purchase_id = int(command_parts[1])
-            except ValueError:
-                await message.reply("❌ Purchase ID must be a number")
-                return
-
-            reply = await message.reply(f"🔄 Analyzing purchase {purchase_id}...")
-
-            with Session() as session:
-                # First, get purchase details
-                purchase = session.query(Purchase).filter_by(purchaseID=purchase_id).first()
-
-                if not purchase:
-                    await reply.edit_text(f"❌ Purchase {purchase_id} not found")
-                    return
-
-                # Get user info
-                user = session.query(User).filter_by(userID=purchase.userID).first()
-                user_name = user.firstname if user else "Unknown"
-
-                # Check for related records
-                related_bonuses = session.query(Bonus).filter_by(purchaseID=purchase_id).all()
-                related_active_balance = session.query(ActiveBalance).filter(
-                    ActiveBalance.reason.like(f'%purchase={purchase_id}%')
-                ).all()
-                related_passive_balance = session.query(PassiveBalance).filter(
-                    PassiveBalance.reason.like(f'%bonus=%')
-                ).join(Bonus).filter(Bonus.purchaseID == purchase_id).all()
-
-                # Show analysis
-                analysis = (
-                    f"📊 Purchase Analysis:\n\n"
-                    f"🆔 Purchase ID: {purchase_id}\n"
-                    f"👤 User: {user_name} (ID: {purchase.userID})\n"
-                    f"📦 Project: {purchase.projectName} (ID: {purchase.projectID})\n"
-                    f"🎯 Quantity: {purchase.packQty} shares\n"
-                    f"💰 Price: ${purchase.packPrice:.2f}\n"
-                    f"🔧 Option: {purchase.optionID}\n"
-                    f"📅 Date: {purchase.createdAt.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                    f"🔗 Related Records:\n"
-                    f"• Bonuses: {len(related_bonuses)}\n"
-                    f"• Active Balance: {len(related_active_balance)}\n"
-                    f"• Passive Balance: {len(related_passive_balance)}\n\n"
-                )
-
-                if related_bonuses:
-                    total_bonuses = sum(b.bonusAmount for b in related_bonuses)
-                    analysis += f"💰 Total bonuses paid: ${total_bonuses:.2f}\n"
-
-                analysis += "⚠️ This will permanently delete the purchase and ALL related records!"
-
-                await reply.edit_text(analysis)
-
-                # Wait for confirmation (in real implementation, you'd use FSM or inline keyboard)
-                await asyncio.sleep(2)
-
-                confirmation_msg = await message.reply(
-                    "⚠️ Are you sure you want to delete this purchase?\n\n"
-                    "This action cannot be undone and will:\n"
-                    "• Delete the purchase record\n"
-                    "• Delete all related bonuses\n"
-                    "• Delete related balance records\n"
-                    "• Update user balances\n\n"
-                    "Reply with 'CONFIRM DELETE' to proceed"
-                )
-
-                # In a real implementation, you'd use FSM here
-                # For now, let's implement immediate deletion with admin confirmation
-
-        except Exception as e:
-            logger.error(f"Error in delpurchase analysis: {e}", exc_info=True)
-            await message.reply(f"❌ Error analyzing purchase: {str(e)}")
-
-    async def handle_delpurchase_confirm(self, message: types.Message, purchase_id: int):
-        """Actual deletion after confirmation"""
-        try:
-            reply = await message.reply(f"🔄 Deleting purchase {purchase_id}...")
-
-            with Session() as session:
-                # Get admin user for logging
-                admin_user = session.query(User).filter_by(telegramID=message.from_user.id).first()
-                admin_name = admin_user.firstname if admin_user else "Unknown Admin"
-
-                # Begin transaction
-                session.begin()
-
-                try:
-                    # Get purchase details before deletion
-                    purchase = session.query(Purchase).filter_by(purchaseID=purchase_id).first()
-                    if not purchase:
-                        await reply.edit_text(f"❌ Purchase {purchase_id} not found")
-                        return
-
-                    user = session.query(User).filter_by(userID=purchase.userID).first()
-
-                    # 1. Delete related bonuses and update balances
-                    bonuses = session.query(Bonus).filter_by(purchaseID=purchase_id).all()
-                    total_bonuses_removed = 0
-
-                    for bonus in bonuses:
-                        # Decrease passive balance of bonus recipient
-                        bonus_user = session.query(User).filter_by(userID=bonus.userID).first()
-                        if bonus_user:
-                            bonus_user.balancePassive -= bonus.bonusAmount
-                            total_bonuses_removed += bonus.bonusAmount
-
-                            # Create negative passive balance record
-                            passive_record = PassiveBalance(
-                                userID=bonus_user.userID,
-                                firstname=bonus_user.firstname,
-                                surname=bonus_user.surname,
-                                amount=-bonus.bonusAmount,
-                                status='done',
-                                reason=f'bonus_removal={bonus.bonusID}',
-                                notes=f'Bonus removed due to purchase deletion by admin: {admin_name}'
-                            )
-                            session.add(passive_record)
-
-                    # Delete bonuses
-                    session.query(Bonus).filter_by(purchaseID=purchase_id).delete()
-
-                    # 2. Delete related active balance records
-                    active_balance_records = session.query(ActiveBalance).filter(
-                        ActiveBalance.reason.like(f'%purchase={purchase_id}%')
-                    ).all()
-
-                    balance_adjustment = 0
-                    for record in active_balance_records:
-                        if record.reason == f'purchase={purchase_id}':
-                            # This was the original purchase deduction
-                            balance_adjustment = -record.amount  # Restore the balance
-
-                    session.query(ActiveBalance).filter(
-                        ActiveBalance.reason.like(f'%purchase={purchase_id}%')
-                    ).delete()
-
-                    # 3. Adjust user's active balance if needed
-                    if balance_adjustment != 0 and user:
-                        user.balanceActive += balance_adjustment
-
-                        # Create balance restoration record
-                        restore_record = ActiveBalance(
-                            userID=user.userID,
-                            firstname=user.firstname,
-                            surname=user.surname,
-                            amount=balance_adjustment,
-                            status='done',
-                            reason=f'purchase_deletion={purchase_id}',
-                            notes=f'Balance restored due to purchase deletion by admin: {admin_name}'
-                        )
-                        session.add(restore_record)
-
-                    # 4. Delete the purchase record
-                    session.query(Purchase).filter_by(purchaseID=purchase_id).delete()
-
-                    # 5. Create admin log entry
-                    admin_log = ActiveBalance(
-                        userID=admin_user.userID if admin_user else 0,
-                        firstname=admin_name,
-                        surname=admin_user.surname if admin_user else '',
-                        amount=0.0,
-                        status='done',
-                        reason=f'admin_deletion={purchase_id}',
-                        notes=f'Purchase {purchase_id} deleted by admin. '
-                              f'User: {user.firstname} (ID: {user.userID}), '
-                              f'Shares: {purchase.packQty}, Price: ${purchase.packPrice:.2f}, '
-                              f'Bonuses removed: ${total_bonuses_removed:.2f}'
-                    )
-                    session.add(admin_log)
-
-                    # Commit transaction
-                    session.commit()
-
-                    # Success message
-                    await reply.edit_text(
-                        f"✅ Purchase {purchase_id} deleted successfully!\n\n"
-                        f"📊 Deleted:\n"
-                        f"• Purchase: {purchase.packQty} shares of {purchase.projectName}\n"
-                        f"• Bonuses: {len(bonuses)} records (${total_bonuses_removed:.2f})\n"
-                        f"• Balance records: {len(active_balance_records)}\n\n"
-                        f"💰 User balance restored: ${balance_adjustment:.2f}\n"
-                        f"👤 Affected user: {user.firstname} (ID: {user.userID})"
-                    )
-
-                    # Notify affected users
-                    if user and balance_adjustment != 0:
-                        text, buttons = await MessageTemplates.get_raw_template(
-                            'purchase_deleted_notification',
-                            {
-                                'firstname': user.firstname,
-                                'purchase_id': purchase_id,
-                                'shares': purchase.packQty,
-                                'project_name': purchase.projectName,
-                                'balance_restored': balance_adjustment,
-                                'admin_name': admin_name
-                            },
-                            lang=user.lang
-                        )
-
-                        notification = Notification(
-                            source="admin_command",
-                            text=text,
-                            buttons=buttons,
-                            target_type="user",
-                            target_value=str(user.userID),
-                            priority=2,
-                            category="admin",
-                            importance="high",
-                            parse_mode="HTML"
-                        )
-                        session.add(notification)
-                        session.commit()
-
-                    logger.info(f"Purchase {purchase_id} deleted by admin {message.from_user.id}")
-
-                except Exception as e:
-                    session.rollback()
-                    raise e
-
-        except Exception as e:
-            logger.error(f"Error in delpurchase confirm: {e}", exc_info=True)
-            await message.reply(f"❌ Error deleting purchase: {str(e)}")
 
     async def handle_admin_command(self, message: types.Message, state: FSMContext):
         """Обработчик админских команд"""
@@ -1321,6 +1402,9 @@ class AdminCommands:
 
         elif command.startswith("delpurchase"):
             await self.handle_delpurchase(message)
+
+        elif command == "addbalance":
+            await self.handle_addbalance(message)
 
         elif command == "testmail":
             await self.handle_testmail(message)
